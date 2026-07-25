@@ -1,0 +1,51 @@
+# Environment & Secrets
+.env
+.env.*
+.envrc
+token.txt
+
+# Virtual Environments
+.venv
+.venv/
+venv/
+env/
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.mypy_cache/
+
+# Build & Distribution
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Agent Tooling
+.omo/
+
+# Certificates (local development; never commit private keys)
+certs/*.pem
+
+# Logs & Temporary Files
+*.log
+logs/
+tmp/
+temp/
+*.bak
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
