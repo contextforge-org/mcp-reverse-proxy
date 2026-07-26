@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/cli.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -13,12 +12,11 @@ from __future__ import annotations
 # Standard
 import argparse
 import asyncio
-from contextlib import suppress
 import logging
 import os
 import signal
 import sys
-from typing import List, Optional
+from contextlib import suppress
 
 # Third-Party
 import orjson
@@ -37,13 +35,13 @@ from mcp_reverse_proxy.client import (
     ReverseProxyClient,
     StdioSubprocessTerminated,
 )
+from mcp_reverse_proxy.logging_config import LoggingService
 from mcp_reverse_proxy.transports.sse_adapter import SseAdapter
 from mcp_reverse_proxy.transports.stdio_adapter import StdioAdapter
 from mcp_reverse_proxy.transports.streamablehttp_adapter import (
     StreamableHttpAdapter,
 )
 from mcp_reverse_proxy.transports.websocket_adapter import WebSocketAdapter
-from mcp_reverse_proxy.logging_config import LoggingService
 
 # Initialize logging
 logging_service = LoggingService()
@@ -81,7 +79,7 @@ def _load_cert_from_cli_arg(cert_path: str) -> str:
         raise FileNotFoundError(f"Certificate file not found: {cert_path_expanded}")
 
     LOGGER.info(f"Loading certificate from CLI argument: {cert_path_expanded}")
-    with open(cert_path_expanded, 'r', encoding='utf-8') as f:
+    with open(cert_path_expanded, encoding='utf-8') as f:
         cert_data = f.read()
 
     # Validate it looks like PEM content
@@ -92,11 +90,11 @@ def _load_cert_from_cli_arg(cert_path: str) -> str:
 
 
 def create_mcp_transport(
-    local_stdio: Optional[str] = None,
-    local_streamable_http: Optional[str] = None,
-    local_sse: Optional[str] = None,
-    cert: Optional[str] = None,
-    mcp_cert: Optional[str] = None,
+    local_stdio: str | None = None,
+    local_streamable_http: str | None = None,
+    local_sse: str | None = None,
+    cert: str | None = None,
+    mcp_cert: str | None = None,
     cert_from_cli: bool = False,
 ) -> McpServerTransport:
     """Create MCP server transport based on configuration.
@@ -131,19 +129,19 @@ def create_mcp_transport(
 
     if len(specified) == 0:
         raise ValueError(
-            "Must specify one MCP server transport " "(--local-stdio, --local-streamable-http, or --local-sse)")
+            "Must specify one MCP server transport (--local-stdio, --local-streamable-http, or --local-sse)")
     if len(specified) > 1:
         raise ValueError("Can only specify one MCP server transport")
 
     if local_stdio:
         LOGGER.info(f"Using stdio transport: {local_stdio}")
         return StdioAdapter(local_stdio)
-    elif local_streamable_http:
+    if local_streamable_http:
         LOGGER.info(f"Using Streamable HTTP transport: {local_streamable_http}")
         if mcp_certificate:
             LOGGER.info("Using MCP-specific certificate for server connection")
         return StreamableHttpAdapter(local_streamable_http, cert=mcp_certificate)
-    elif local_sse:
+    if local_sse:
         LOGGER.info(f"Using SSE transport: {local_sse}")
         if mcp_certificate:
             LOGGER.info("Using MCP-specific certificate for server connection")
@@ -155,9 +153,9 @@ def create_mcp_transport(
 def create_gateway_transport(
     gateway_url: str,
     session_id: str,
-    token: Optional[str] = None,
-    cert: Optional[str] = None,
-    gateway_cert: Optional[str] = None,
+    token: str | None = None,
+    cert: str | None = None,
+    gateway_cert: str | None = None,
     cert_from_cli: bool = False,
 ) -> GatewayTransport:
     """Create gateway transport (currently WebSocket only).
@@ -192,7 +190,7 @@ def create_gateway_transport(
     return WebSocketAdapter(gateway_url, session_id, token=token, cert=gateway_certificate)
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         prog="mcp-reverse-proxy",
@@ -307,7 +305,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     if args.config:
         try:
             config_path = os.path.expanduser(args.config)
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 # Determine format by file extension
                 if config_path.endswith((".yaml", ".yml")):
                     if not yaml:
@@ -354,7 +352,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return args
 
 
-async def main(argv: Optional[List[str]] = None) -> None:
+async def main(argv: list[str] | None = None) -> None:
     """Main entry point for reverse proxy."""
     args = parse_args(argv)
 

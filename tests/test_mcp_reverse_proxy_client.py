@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/tests/test_mcp_reverse_proxy_client.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -19,9 +18,10 @@ from unittest.mock import AsyncMock
 # Third-Party
 import pytest
 
+import mcp_reverse_proxy.client as client_mod
+
 # First-Party
 from mcp_reverse_proxy.base import ConnectionState, MessageType
-import mcp_reverse_proxy.client as client_mod
 from mcp_reverse_proxy.client import ReverseProxyClient, SessionExpiredError, StdioSubprocessTerminated
 
 

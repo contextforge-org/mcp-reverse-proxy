@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/cert_utils.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -36,7 +35,7 @@ def load_cert_data(cert: str) -> str:
     if not os.path.isfile(cert_path):
         raise FileNotFoundError(f"Certificate file not found: {cert_path}")
 
-    with open(cert_path, 'r', encoding='utf-8') as f:
+    with open(cert_path, encoding='utf-8') as f:
         cert_data = f.read()
 
     # Validate it looks like PEM content

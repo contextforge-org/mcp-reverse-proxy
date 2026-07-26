@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/tests/test_mcp_reverse_proxy_sse_adapter.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0

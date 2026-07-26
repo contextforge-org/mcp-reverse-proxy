@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/tests/test_mcp_reverse_proxy_stdio_adapter.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -158,7 +157,7 @@ async def test_stop_force_kills_process_after_timeout(monkeypatch) -> None:
 
     async def fake_wait_for(awaitable, timeout: float):
         await awaitable
-        raise asyncio.TimeoutError()
+        raise TimeoutError
 
     monkeypatch.setattr("mcp_reverse_proxy.transports.stdio_adapter.asyncio.wait_for", fake_wait_for)
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/transports/websocket_adapter.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -13,9 +12,9 @@ from __future__ import annotations
 
 # Standard
 import asyncio
-import os
 import ssl
-from typing import Any, Awaitable, Callable, cast, List, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 from urllib.parse import urljoin
 
 try:
@@ -47,8 +46,8 @@ class WebSocketAdapter(GatewayTransport):
         self,
         gateway_url: str,
         session_id: str,
-        token: Optional[str] = None,
-        cert: Optional[str] = None,
+        token: str | None = None,
+        cert: str | None = None,
     ):
         """Initialize WebSocket adapter.
 
@@ -63,10 +62,10 @@ class WebSocketAdapter(GatewayTransport):
         self.token = token
         self.cert = cert
 
-        self._connection: Optional[WSClientProtocol] = None
+        self._connection: WSClientProtocol | None = None
         self._connected = False
-        self._message_handlers: List[Callable[[str], Awaitable[None]]] = []
-        self._receive_task: Optional[asyncio.Task[None]] = None
+        self._message_handlers: list[Callable[[str], Awaitable[None]]] = []
+        self._receive_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         """Establish WebSocket connection to gateway."""
@@ -117,7 +116,7 @@ class WebSocketAdapter(GatewayTransport):
                 # No cert provided - disable verification (insecure, for development only)
                 ssl_context = ssl.create_default_context()
                 ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE  # noqa: DUO122
+                ssl_context.verify_mode = ssl.CERT_NONE
 
         # Connect
         self._connection = await websockets.connect(

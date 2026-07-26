@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/__init__.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -16,8 +15,8 @@ from mcp_reverse_proxy.base import (
 
 __all__ = [
     "ConnectionState",
-    "MessageType",
-    "McpServerTransport",
     "GatewayTransport",
+    "McpServerTransport",
+    "MessageType",
 ]
 

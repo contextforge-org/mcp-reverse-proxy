@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/transports/streamablehttp_adapter.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -16,7 +15,7 @@ from __future__ import annotations
 # Standard
 import asyncio
 import ssl
-from typing import Awaitable, Callable, List, Optional
+from collections.abc import Awaitable, Callable
 
 # Third-Party
 import httpx
@@ -46,7 +45,7 @@ class StreamableHttpAdapter(McpServerTransport):
     def __init__(
         self,
         server_url: str,
-        cert: Optional[str] = None,
+        cert: str | None = None,
         timeout: float = 90.0,
     ):
         """Initialize Streamable HTTP adapter.
@@ -60,17 +59,17 @@ class StreamableHttpAdapter(McpServerTransport):
         self.cert = cert
         self.timeout = timeout
 
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
         self._connected = False
-        self._message_handlers: List[Callable[[str], Awaitable[None]]] = []
-        self._receive_task: Optional[asyncio.Task[None]] = None
+        self._message_handlers: list[Callable[[str], Awaitable[None]]] = []
+        self._receive_task: asyncio.Task[None] | None = None
         # Streamable HTTP uses the main endpoint for communication
         self._endpoint_url = self.server_url
         # Message endpoint (for consistency with SSE adapter health checks)
-        self._message_endpoint: Optional[str] = None
+        self._message_endpoint: str | None = None
         # Session management (MCP protocol requirement)
-        self._session_id: Optional[str] = None
-        self._protocol_version: Optional[str] = None
+        self._session_id: str | None = None
+        self._protocol_version: str | None = None
         # Authentication headers from gateway
         self._auth_headers: dict[str, str] = {}
 
@@ -107,7 +106,7 @@ class StreamableHttpAdapter(McpServerTransport):
             else:
                 ssl_context = ssl.create_default_context()
                 ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE  # noqa: DUO122
+                ssl_context.verify_mode = ssl.CERT_NONE
 
         # Create HTTP client with HTTP/2 support
         self._client = httpx.AsyncClient(

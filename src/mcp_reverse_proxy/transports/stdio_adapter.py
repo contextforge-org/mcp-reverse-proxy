@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/transports/stdio_adapter.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -13,10 +12,10 @@ from __future__ import annotations
 
 # Standard
 import asyncio
-from contextlib import suppress
 import shlex
 import sys
-from typing import Awaitable, Callable, List, Optional
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 # First-Party
 from mcp_reverse_proxy.base import McpServerTransport
@@ -40,9 +39,9 @@ class StdioAdapter(McpServerTransport):
             command: The command to run as a subprocess.
         """
         self.command = command
-        self.process: Optional[asyncio.subprocess.Process] = None
-        self._stdout_reader_task: Optional[asyncio.Task[None]] = None
-        self._message_handlers: List[Callable[[str], Awaitable[None]]] = []
+        self.process: asyncio.subprocess.Process | None = None
+        self._stdout_reader_task: asyncio.Task[None] | None = None
+        self._message_handlers: list[Callable[[str], Awaitable[None]]] = []
 
     async def start(self) -> None:
         """Start the stdio subprocess."""
@@ -70,7 +69,7 @@ class StdioAdapter(McpServerTransport):
         # Use a longer delay to catch processes that fail during startup
         await asyncio.sleep(0.5)
         if self.process.returncode is not None:
-            raise RuntimeError(f"Subprocess terminated immediately after start (exit code: {self.process.returncode}). " f"Command: {self.command}")
+            raise RuntimeError(f"Subprocess terminated immediately after start (exit code: {self.process.returncode}). Command: {self.command}")
 
     async def stop(self) -> None:
         """Stop the stdio subprocess gracefully."""

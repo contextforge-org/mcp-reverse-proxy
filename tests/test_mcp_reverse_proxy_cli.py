@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/tests/test_mcp_reverse_proxy_cli.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -279,7 +278,7 @@ def test_run_exits_zero_on_keyboard_interrupt(monkeypatch) -> None:
     """KeyboardInterrupt should produce a clean zero exit code."""
 
     def _raise_keyboard_interrupt(_coro) -> None:
-        raise KeyboardInterrupt()
+        raise KeyboardInterrupt
 
     monkeypatch.setattr(cli.asyncio, "run", _raise_keyboard_interrupt)
 

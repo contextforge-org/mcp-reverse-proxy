@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/transports/sse_adapter.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -15,9 +14,8 @@ from __future__ import annotations
 
 # Standard
 import asyncio
-import os
 import ssl
-from typing import Awaitable, Callable, List, Optional
+from collections.abc import Awaitable, Callable
 
 # Third-Party
 import httpx
@@ -55,7 +53,7 @@ class SseAdapter(McpServerTransport):
     def __init__(
         self,
         server_url: str,
-        cert: Optional[str] = None,
+        cert: str | None = None,
         timeout: float = 90.0,
     ):
         """Initialize SSE adapter.
@@ -69,13 +67,13 @@ class SseAdapter(McpServerTransport):
         self.cert = cert
         self.timeout = timeout
 
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
         self._connected = False
-        self._message_handlers: List[Callable[[str], Awaitable[None]]] = []
-        self._receive_task: Optional[asyncio.Task[None]] = None
-        self._message_endpoint: Optional[str] = None
-        self._session_id: Optional[str] = None
-        self._protocol_version: Optional[str] = None
+        self._message_handlers: list[Callable[[str], Awaitable[None]]] = []
+        self._receive_task: asyncio.Task[None] | None = None
+        self._message_endpoint: str | None = None
+        self._session_id: str | None = None
+        self._protocol_version: str | None = None
         self._auth_headers: dict[str, str] = {}
         self._shutdown_event = asyncio.Event()
 
@@ -119,7 +117,7 @@ class SseAdapter(McpServerTransport):
             else:
                 ssl_context = ssl.create_default_context()
                 ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE  # noqa: DUO122
+                ssl_context.verify_mode = ssl.CERT_NONE
 
         # Create HTTP client with HTTP/2 support for better SSE performance
         self._client = httpx.AsyncClient(
@@ -395,7 +393,7 @@ class SseAdapter(McpServerTransport):
 
             parsed_endpoint = urlparse(self._message_endpoint)
             query_params = parse_qs(parsed_endpoint.query)
-            if "session_id" in query_params and query_params["session_id"]:
+            if query_params.get("session_id"):
                 self._session_id = query_params["session_id"][0]
                 LOGGER.info(f"Extracted session ID from endpoint URL: {self._session_id}")
 

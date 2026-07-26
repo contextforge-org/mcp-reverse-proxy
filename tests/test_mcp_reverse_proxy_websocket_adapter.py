@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/tests/test_mcp_reverse_proxy_websocket_adapter.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -18,9 +17,10 @@ from unittest.mock import AsyncMock, Mock
 # Third-Party
 import pytest
 
+import mcp_reverse_proxy.transports.websocket_adapter as websocket_adapter_mod
+
 # First-Party
 from mcp_reverse_proxy.transports.websocket_adapter import WebSocketAdapter
-import mcp_reverse_proxy.transports.websocket_adapter as websocket_adapter_mod
 
 
 class FakeWebSocketConnection:

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/base.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -14,8 +13,8 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from enum import Enum
-from typing import Awaitable, Callable
 
 
 class ConnectionState(Enum):
@@ -92,7 +91,7 @@ class McpServerTransport(ABC):
             This is optional and only used by HTTP-based transports.
             Stdio-based transports can ignore this as they don't use HTTP headers.
         """
-        pass  # Default implementation does nothing (for stdio)
+        # Default implementation does nothing (for stdio)
 
 
 class GatewayTransport(ABC):

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Location: ./mcp_reverse_proxy/logging_config.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
@@ -12,7 +11,6 @@ This module provides a simplified, self-contained logging setup with no parent-p
 import logging
 import os
 import socket
-from typing import Any, Dict
 
 # Third-Party
 from pythonjsonlogger import jsonlogger
@@ -38,14 +36,14 @@ class CorrelationIdJsonFormatter(jsonlogger.JsonFormatter):
             message_dict: Additional message fields.
         """
         super().add_fields(log_record, record, message_dict)
-        
+
         # Add standard fields
         log_record["timestamp"] = self.formatTime(record, self.datefmt)
         log_record["level"] = record.levelname
         log_record["logger"] = record.name
         log_record["hostname"] = _CACHED_HOSTNAME
         log_record["pid"] = _CACHED_PID
-        
+
         # Add exception info if present
         if record.exc_info:
             log_record["exception"] = self.formatException(record.exc_info)
@@ -64,7 +62,7 @@ class LoggingService:
 
     def __init__(self) -> None:
         """Initialize logging service."""
-        self._loggers: Dict[str, logging.Logger] = {}
+        self._loggers: dict[str, logging.Logger] = {}
 
     def get_logger(self, name: str) -> logging.Logger:
         """Get or create a logger with the given name.
