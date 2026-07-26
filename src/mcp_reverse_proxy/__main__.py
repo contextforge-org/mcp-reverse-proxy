@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
 Entry point for running reverse proxy as a module.
-Allows: python -m mcpgateway.mcp_reverse_proxy
+Allows: python -m mcp_reverse_proxy
 """
 
 # First-Party

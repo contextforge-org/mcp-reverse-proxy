@@ -20,11 +20,6 @@ The tests were moved from `tests/unit/mcpgateway/test_mcp_reverse_proxy_*` to th
 
 From the repository root:
 ```bash
-pytest mcp_reverse_proxy/tests/
-```
-
-From the mcp_reverse_proxy directory:
-```bash
 pytest tests/
 ```
 

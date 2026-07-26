@@ -57,7 +57,7 @@ The reverse proxy uses a **transport abstraction pattern** following SOLID princ
 ### Stdio Transport (Local MCP Server)
 
 ```bash
-python -m mcpgateway.reverse_proxy.cli \
+python -m mcp_reverse_proxy.cli \
   --local-stdio "uvx mcp-server-git" \
   --gateway https://gateway.example.com \
   --token $TOKEN
@@ -66,7 +66,7 @@ python -m mcpgateway.reverse_proxy.cli \
 ### Streamable HTTP Transport (Remote MCP Server)
 
 ```bash
-python -m mcpgateway.mcp_reverse_proxy.cli \
+python -m mcp_reverse_proxy.cli \
   --local-streamable-http http://mcp-server.local:8000/mcp \
   --gateway https://gateway.example.com \
   --token $TOKEN
@@ -75,7 +75,7 @@ python -m mcpgateway.mcp_reverse_proxy.cli \
 ### SSE Transport (Remote MCP Server)
 
 ```bash
-python -m mcpgateway.mcp_reverse_proxy.cli \
+python -m mcp_reverse_proxy.cli \
   --local-sse http://mcp-server.local:9020/sse \
   --gateway https://gateway.example.com \
   --token $TOKEN
@@ -104,7 +104,7 @@ The reverse proxy client actively monitors the health of the local MCP server be
 
 **Configuration:**
 ```bash
-python -m mcpgateway.mcp_reverse_proxy.cli \
+python -m mcp_reverse_proxy.cli \
   --local-stdio "uvx mcp-server-git" \
   --gateway wss://gateway.example.com/reverse-proxy \
   --keepalive 30 \

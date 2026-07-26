@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 Authors: Mihai Criveti
 
 Standalone logging configuration for reverse proxy.
-This module provides a simplified logging setup that doesn't depend on the parent mcpgateway package.
+This module provides a simplified, self-contained logging setup with no parent-package dependencies.
 """
 
 # Standard
