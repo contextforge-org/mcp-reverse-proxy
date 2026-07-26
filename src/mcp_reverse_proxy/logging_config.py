@@ -80,4 +80,3 @@ class LoggingService:
             self._loggers[name] = logger
         return self._loggers[name]
 
-# Made with Bob

@@ -14,4 +14,3 @@ from mcp_reverse_proxy.cli import run
 if __name__ == "__main__":
     run()
 
-# Made with Bob

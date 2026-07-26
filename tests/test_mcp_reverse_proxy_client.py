@@ -410,7 +410,6 @@ async def test_send_error_response_sends_gateway_envelope(proxy_client) -> None:
     assert '"id":33' in payload or '"id": 33' in payload
     assert "broken" in payload
 
-# Made with Bob
 
 
 @pytest.mark.asyncio

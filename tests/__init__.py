@@ -7,4 +7,3 @@ Authors: Mihai Criveti
 Test package for mcp_reverse_proxy.
 """
 
-# Made with Bob
