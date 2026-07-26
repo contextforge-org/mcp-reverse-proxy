@@ -56,7 +56,7 @@ A gateway-side integration package, `mcp-reverse-proxy-contextforge`, is planned
 ## Documentation
 
 - [docs/README.md](docs/README.md): architecture, transport abstraction, and health-check strategy
-- [docs/USER_README.md](docs/USER_README.md): user guide with installation, TLS configuration, and troubleshooting
+- [USER_README.md](USER_README.md): user guide with installation, TLS configuration, and troubleshooting
 
 ## Development
 
