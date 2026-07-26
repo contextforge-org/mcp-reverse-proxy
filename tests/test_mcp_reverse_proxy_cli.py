@@ -216,7 +216,7 @@ async def test_main_creates_client_and_disconnects_on_shutdown(monkeypatch) -> N
         mcp_health_check_retry_interval=1.5,
         log_level="INFO",
     )
-    monkeypatch.setattr(cli, "parse_args", lambda argv=None: args)
+    monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
 
     created: dict[str, object] = {}
     disconnect_mock = AsyncMock()
@@ -292,7 +292,7 @@ def test_run_exits_one_on_stdio_subprocess_terminated(monkeypatch) -> None:
     """Stdio subprocess termination should exit non-zero for supervisor restart."""
 
     def _raise_stdio_terminated(_coro) -> None:
-        raise cli.StdioSubprocessTerminated("subprocess died")
+        raise cli.StdioSubprocessTerminatedError("subprocess died")
 
     monkeypatch.setattr(cli.asyncio, "run", _raise_stdio_terminated)
 

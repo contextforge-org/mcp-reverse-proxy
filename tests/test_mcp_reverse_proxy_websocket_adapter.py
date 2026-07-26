@@ -91,11 +91,11 @@ async def test_connect_uses_secure_defaults_and_custom_cert(monkeypatch) -> None
 
     # Mock load_cert_data to return test certificate data
     test_cert_data = "MOCK_CERT_DATA"
-    monkeypatch.setattr(websocket_adapter_mod, "load_cert_data", lambda cert: test_cert_data)
+    monkeypatch.setattr(websocket_adapter_mod, "load_cert_data", lambda _cert: test_cert_data)
 
     monkeypatch.setattr(websocket_adapter_mod, "websockets", Mock(connect=connect_mock))
     # Mock SSLContext constructor to return our fake context
-    monkeypatch.setattr(websocket_adapter_mod.ssl, "SSLContext", lambda protocol: fake_ssl_context)
+    monkeypatch.setattr(websocket_adapter_mod.ssl, "SSLContext", lambda _protocol: fake_ssl_context)
     monkeypatch.setattr(websocket_adapter_mod.asyncio, "create_task", Mock(return_value=receive_task))
 
     adapter = WebSocketAdapter("gateway.example/base", "session-1", cert="test_cert_input")
@@ -211,7 +211,7 @@ async def test_receive_messages_continues_when_handler_raises() -> None:
 async def test_receive_messages_treats_connection_closed_as_clean_shutdown(monkeypatch) -> None:
     """ConnectionClosed exceptions should end the loop and clear adapter state."""
 
-    class FakeConnectionClosed(Exception):
+    class FakeConnectionClosedError(Exception):
         """Fake connection-closed exception type."""
 
     class RaisingConnection:
@@ -221,10 +221,10 @@ async def test_receive_messages_treats_connection_closed_as_clean_shutdown(monke
             return self
 
         async def __anext__(self):
-            raise FakeConnectionClosed("closed")
+            raise FakeConnectionClosedError("closed")
 
     fake_websockets = Mock()
-    fake_websockets.exceptions = Mock(ConnectionClosed=FakeConnectionClosed)
+    fake_websockets.exceptions = Mock(ConnectionClosed=FakeConnectionClosedError)
     monkeypatch.setattr(websocket_adapter_mod, "websockets", fake_websockets)
 
     adapter = WebSocketAdapter("http://gateway.example", "session-1")
@@ -248,7 +248,7 @@ async def test_receive_messages_re_raises_cancelled_error() -> None:
             return self
 
         async def __anext__(self):
-            raise asyncio.CancelledError()
+            raise asyncio.CancelledError
 
     adapter = WebSocketAdapter("http://gateway.example", "session-1")
     adapter._connected = True

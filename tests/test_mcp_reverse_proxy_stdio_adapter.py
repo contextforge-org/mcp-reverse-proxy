@@ -155,7 +155,7 @@ async def test_stop_force_kills_process_after_timeout(monkeypatch) -> None:
     adapter.process = process
     adapter._stdout_reader_task = None
 
-    async def fake_wait_for(awaitable, timeout: float):
+    async def fake_wait_for(awaitable, timeout: float):  # noqa: ARG001 - signature must match asyncio.wait_for (keyword call site)
         await awaitable
         raise TimeoutError
 

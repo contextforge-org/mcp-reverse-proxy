@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 # Third-Party
 import httpx
@@ -123,7 +124,8 @@ class SseAdapter(McpServerTransport):
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout),
             http2=True,
-            verify=ssl_context if is_https else False,
+            # ssl_context is always set when is_https (both branches above)
+            verify=ssl_context if (is_https and ssl_context is not None) else False,
         )
 
         self._connected = True
@@ -149,10 +151,8 @@ class SseAdapter(McpServerTransport):
 
         if self._receive_task:
             self._receive_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._receive_task
-            except asyncio.CancelledError:
-                pass
 
         if self._client:
             await self._client.aclose()
@@ -314,9 +314,9 @@ class SseAdapter(McpServerTransport):
                         LOGGER.info("Shutdown requested, closing SSE stream")
                         break
 
-                    line = line.strip()
+                    stripped_line = line.strip()
 
-                    if not line:
+                    if not stripped_line:
                         # Empty line marks end of event
                         if event_type and data_lines:
                             await self._process_sse_event(event_type, "\n".join(data_lines))
@@ -324,10 +324,10 @@ class SseAdapter(McpServerTransport):
                             data_lines = []
                         continue
 
-                    if line.startswith("event:"):
-                        event_type = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data_lines.append(line[5:].strip())
+                    if stripped_line.startswith("event:"):
+                        event_type = stripped_line[6:].strip()
+                    elif stripped_line.startswith("data:"):
+                        data_lines.append(stripped_line[5:].strip())
                     elif line.startswith("retry:"):
                         # Retry timeout - informational only
                         pass

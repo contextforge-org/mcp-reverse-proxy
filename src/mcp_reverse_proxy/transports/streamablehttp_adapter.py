@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 # Third-Party
 import httpx
@@ -112,7 +113,8 @@ class StreamableHttpAdapter(McpServerTransport):
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout),
             http2=True,
-            verify=ssl_context if is_https else False,
+            # ssl_context is always set when is_https (both branches above)
+            verify=ssl_context if (is_https and ssl_context is not None) else False,
         )
 
         self._connected = True
@@ -138,10 +140,8 @@ class StreamableHttpAdapter(McpServerTransport):
 
         if self._receive_task:
             self._receive_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._receive_task
-            except asyncio.CancelledError:
-                pass
 
         if self._client:
             await self._client.aclose()
@@ -229,7 +229,7 @@ class StreamableHttpAdapter(McpServerTransport):
                 # Parse SSE format if present (streamable HTTP may return SSE-formatted responses)
                 # SSE format: "event: message\ndata: {json}\n\n"
                 json_message = response_text
-                if response_text.startswith("event:") or response_text.startswith("data:"):
+                if response_text.startswith(("event:", "data:")):
                     # Extract JSON from SSE format
                     lines = response_text.strip().split("\n")
                     for line in lines:
@@ -312,7 +312,7 @@ class StreamableHttpAdapter(McpServerTransport):
 
                             # Parse SSE format if present
                             json_message = response_text
-                            if response_text.startswith("event:") or response_text.startswith("data:"):
+                            if response_text.startswith(("event:", "data:")):
                                 lines = response_text.strip().split("\n")
                                 for line in lines:
                                     if line.startswith("data:"):

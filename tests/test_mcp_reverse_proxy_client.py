@@ -22,7 +22,7 @@ import mcp_reverse_proxy.client as client_mod
 
 # First-Party
 from mcp_reverse_proxy.base import ConnectionState, MessageType
-from mcp_reverse_proxy.client import ReverseProxyClient, SessionExpiredError, StdioSubprocessTerminated
+from mcp_reverse_proxy.client import ReverseProxyClient, SessionExpiredError, StdioSubprocessTerminatedError
 
 
 class FakeMcpTransport:
@@ -350,7 +350,7 @@ async def test_check_mcp_server_health_for_stdio_terminated_process_raises(proxy
     proxy_client.mcp_transport.process = SimpleNamespace(returncode=17)
     proxy_client.mcp_transport.__class__.__name__ = "StdioAdapter"
 
-    with pytest.raises(StdioSubprocessTerminated, match="returncode=17"):
+    with pytest.raises(StdioSubprocessTerminatedError, match="returncode=17"):
         await proxy_client._check_mcp_server_health()
 
 
@@ -436,9 +436,9 @@ async def test_run_with_reconnect_breaks_after_connect_if_shutdown_state_set(pro
 @pytest.mark.asyncio
 async def test_run_with_reconnect_reraises_stdio_exception_from_connect(proxy_client, monkeypatch) -> None:
     """Stdio termination during connect should be re-raised."""
-    monkeypatch.setattr(proxy_client, "connect", AsyncMock(side_effect=StdioSubprocessTerminated("dead")))
+    monkeypatch.setattr(proxy_client, "connect", AsyncMock(side_effect=StdioSubprocessTerminatedError("dead")))
 
-    with pytest.raises(StdioSubprocessTerminated):
+    with pytest.raises(StdioSubprocessTerminatedError):
         await proxy_client.run_with_reconnect()
 
 

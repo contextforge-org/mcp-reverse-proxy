@@ -73,11 +73,11 @@ async def test_start_configures_https_ssl_context_with_custom_cert(monkeypatch) 
     # Mock load_cert_data to return test certificate data
     test_cert_data = "MOCK_CERT_DATA"
     monkeypatch.setattr("mcp_reverse_proxy.transports.streamablehttp_adapter.load_cert_data",
-                        lambda cert: test_cert_data)
+                        lambda _cert: test_cert_data)
 
     # Mock SSLContext constructor to return our fake context
     monkeypatch.setattr("mcp_reverse_proxy.transports.streamablehttp_adapter.ssl.SSLContext",
-                        lambda protocol: fake_ssl_context)
+                        lambda _protocol: fake_ssl_context)
     monkeypatch.setattr("mcp_reverse_proxy.transports.streamablehttp_adapter.httpx.AsyncClient", async_client_mock)
     monkeypatch.setattr(
         "mcp_reverse_proxy.transports.streamablehttp_adapter.asyncio.create_task",
@@ -286,7 +286,7 @@ async def test_receive_stream_sleeps_until_cancelled(monkeypatch) -> None:
     async def fake_sleep(_delay: float) -> None:
         nonlocal call_count
         call_count += 1
-        raise asyncio.CancelledError()
+        raise asyncio.CancelledError
 
     monkeypatch.setattr("mcp_reverse_proxy.transports.streamablehttp_adapter.asyncio.sleep", fake_sleep)
 

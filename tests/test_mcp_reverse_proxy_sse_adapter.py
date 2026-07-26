@@ -109,10 +109,10 @@ async def test_start_configures_https_ssl_context_with_custom_cert(monkeypatch) 
 
     # Mock load_cert_data to return test certificate data
     test_cert_data = "MOCK_CERT_DATA"
-    monkeypatch.setattr("mcp_reverse_proxy.transports.sse_adapter.load_cert_data", lambda cert: test_cert_data)
+    monkeypatch.setattr("mcp_reverse_proxy.transports.sse_adapter.load_cert_data", lambda _cert: test_cert_data)
 
     # Mock SSLContext constructor to return our fake context
-    monkeypatch.setattr("mcp_reverse_proxy.transports.sse_adapter.ssl.SSLContext", lambda protocol: fake_ssl_context)
+    monkeypatch.setattr("mcp_reverse_proxy.transports.sse_adapter.ssl.SSLContext", lambda _protocol: fake_ssl_context)
     monkeypatch.setattr("mcp_reverse_proxy.transports.sse_adapter.httpx.AsyncClient", async_client_mock)
     monkeypatch.setattr("mcp_reverse_proxy.transports.sse_adapter.asyncio.create_task", create_task_mock)
 

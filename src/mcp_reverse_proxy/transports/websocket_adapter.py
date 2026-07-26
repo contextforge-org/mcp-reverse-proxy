@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import Any, cast
 from urllib.parse import urljoin
 
@@ -145,10 +146,8 @@ class WebSocketAdapter(GatewayTransport):
 
         if self._receive_task:
             self._receive_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._receive_task
-            except asyncio.CancelledError:
-                pass
 
         if self._connection:
             await cast(Any, self._connection).close()
@@ -188,14 +187,13 @@ class WebSocketAdapter(GatewayTransport):
             conn = cast(Any, self._connection)
             async for message in conn:
                 # Ensure message is string
-                if isinstance(message, bytes):
-                    message = message.decode("utf-8")
+                text = message.decode("utf-8") if isinstance(message, bytes) else message
 
-                LOGGER.debug(f"← WS: {message[:200]}...")
+                LOGGER.debug(f"← WS: {text[:200]}...")
 
                 for handler in self._message_handlers:
                     try:
-                        await handler(message)
+                        await handler(text)
                     except Exception as e:
                         LOGGER.error(f"Handler error: {e}")
 

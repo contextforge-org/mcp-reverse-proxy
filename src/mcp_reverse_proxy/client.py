@@ -11,6 +11,7 @@ from __future__ import annotations
 
 # Standard
 import asyncio
+from contextlib import suppress
 from typing import Any
 
 # Third-Party
@@ -42,7 +43,7 @@ DEFAULT_MCP_HEALTH_CHECK_TIMEOUT = 5.0
 DEFAULT_MCP_HEALTH_CHECK_RETRY_INTERVAL = 10.0
 
 
-class StdioSubprocessTerminated(Exception):
+class StdioSubprocessTerminatedError(Exception):
     """Exception raised when stdio subprocess terminates and cannot be recovered."""
 
 
@@ -170,10 +171,8 @@ class ReverseProxyClient:
 
         if self._keepalive_task:
             self._keepalive_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._keepalive_task
-            except asyncio.CancelledError:
-                pass
 
         # Send unregister message
         if await self.gateway_transport.is_connected():
@@ -208,8 +207,8 @@ class ReverseProxyClient:
                         try:
                             # This will re-raise any exception from the task
                             self._keepalive_task.result()
-                        except StdioSubprocessTerminated:
-                            LOGGER.error("[RUN_WITH_RECONNECT] Keepalive task failed with StdioSubprocessTerminated, re-raising")
+                        except StdioSubprocessTerminatedError:
+                            LOGGER.error("[RUN_WITH_RECONNECT] Keepalive task failed with StdioSubprocessTerminatedError, re-raising")
                             raise
                         except Exception as e:
                             LOGGER.error(f"[RUN_WITH_RECONNECT] Keepalive task failed: {e}")
@@ -244,9 +243,9 @@ class ReverseProxyClient:
                 if self.state == ConnectionState.SHUTTING_DOWN:
                     break
 
-            except StdioSubprocessTerminated as e:
+            except StdioSubprocessTerminatedError as e:
                 # Re-raise to trigger proxy shutdown
-                LOGGER.error(f"[RUN_WITH_RECONNECT] Caught StdioSubprocessTerminated, re-raising: {e}")
+                LOGGER.error(f"[RUN_WITH_RECONNECT] Caught StdioSubprocessTerminatedError, re-raising: {e}")
                 LOGGER.error("[RUN_WITH_RECONNECT] About to raise - this should exit the function")
                 raise
             except Exception as e:
@@ -470,7 +469,7 @@ class ReverseProxyClient:
                     LOGGER.error(f"Gateway registration failed for session {data.get('sessionId')}: {error_msg}")
                     LOGGER.error("Disconnecting due to registration failure...")
                     # Schedule disconnect to avoid blocking message handler
-                    asyncio.create_task(self.disconnect())
+                    self._disconnect_task = asyncio.create_task(self.disconnect())
 
             elif msg_type == MessageType.ERROR.value:
                 LOGGER.error(f"Gateway error: {data.get('message', 'Unknown')}")
@@ -546,8 +545,8 @@ class ReverseProxyClient:
                 LOGGER.error("[MCP_HEALTH] Raising exception to trigger proxy shutdown | Process supervisor will restart with fresh subprocess")
 
                 # Raise exception to trigger clean shutdown
-                LOGGER.error("[MCP_HEALTH] About to raise StdioSubprocessTerminated exception")
-                raise StdioSubprocessTerminated(f"Stdio subprocess terminated with returncode={returncode}")
+                LOGGER.error("[MCP_HEALTH] About to raise StdioSubprocessTerminatedError exception")
+                raise StdioSubprocessTerminatedError(f"Stdio subprocess terminated with returncode={returncode}")
 
             if transport_type in ("SseAdapter", "StreamableHttpAdapter"):
                 # For SSE transports: verify the SSE stream is actually established and stable
@@ -604,9 +603,9 @@ class ReverseProxyClient:
                 LOGGER.info(f"[MCP_HEALTH] Unknown transport type {transport_type}, assuming healthy if connected")
                 return is_connected
 
-        except StdioSubprocessTerminated as e:
+        except StdioSubprocessTerminatedError as e:
             # Re-raise this exception to trigger proxy shutdown
-            LOGGER.error(f"[MCP_HEALTH] Caught StdioSubprocessTerminated in health check, re-raising: {e}")
+            LOGGER.error(f"[MCP_HEALTH] Caught StdioSubprocessTerminatedError in health check, re-raising: {e}")
             raise
         except Exception as e:
             LOGGER.warning(f"[MCP_HEALTH] MCP server health check failed: {e}")

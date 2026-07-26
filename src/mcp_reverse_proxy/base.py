@@ -80,7 +80,7 @@ class McpServerTransport(ABC):
             handler: Async function to handle messages.
         """
 
-    def set_authentication(self, auth_headers: dict[str, str], auth_type: str | None = None) -> None:
+    def set_authentication(self, auth_headers: dict[str, str], auth_type: str | None = None) -> None:  # noqa: B027 - optional no-op default; HTTP transports override
         """Set authentication headers for subsequent requests to the MCP server.
 
         Args:

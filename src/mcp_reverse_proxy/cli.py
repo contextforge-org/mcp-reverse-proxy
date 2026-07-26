@@ -33,7 +33,7 @@ from mcp_reverse_proxy.client import (
     DEFAULT_MCP_HEALTH_CHECK_RETRY_INTERVAL,
     DEFAULT_MCP_HEALTH_CHECK_TIMEOUT,
     ReverseProxyClient,
-    StdioSubprocessTerminated,
+    StdioSubprocessTerminatedError,
 )
 from mcp_reverse_proxy.logging_config import LoggingService
 from mcp_reverse_proxy.transports.sse_adapter import SseAdapter
@@ -393,12 +393,10 @@ async def main(argv: list[str] | None = None) -> None:
     gateway_cert_from_cli = '--gateway-cert' in cli_args
     cert_from_cli = '--cert' in cli_args and not args.config
 
-    # Determine which cert to use for MCP and whether it's from CLI
-    mcp_cert_value = getattr(args, "mcp_cert", None) or args.cert
+    # Determine whether the MCP cert came from the command line
     mcp_cert_is_cli = mcp_cert_from_cli or (cert_from_cli and not getattr(args, "mcp_cert", None))
 
-    # Determine which cert to use for gateway and whether it's from CLI
-    gateway_cert_value = getattr(args, "gateway_cert", None) or args.cert
+    # Determine whether the gateway cert came from the command line
     gateway_cert_is_cli = gateway_cert_from_cli or (cert_from_cli and not getattr(args, "gateway_cert", None))
 
     # Create transports
@@ -453,15 +451,15 @@ async def main(argv: list[str] | None = None) -> None:
 
     try:
         # Wait for either shutdown signal or client task to complete
-        done, pending = await asyncio.wait([asyncio.create_task(shutdown_event.wait()), client_task],
+        done, _pending = await asyncio.wait([asyncio.create_task(shutdown_event.wait()), client_task],
                                            return_when=asyncio.FIRST_COMPLETED)
 
         # Check if client_task completed with an exception
         if client_task in done:
             try:
                 client_task.result()  # This will re-raise any exception
-            except StdioSubprocessTerminated as e:
-                LOGGER.error(f"Client task failed with StdioSubprocessTerminated: {e}")
+            except StdioSubprocessTerminatedError as e:
+                LOGGER.error(f"Client task failed with StdioSubprocessTerminatedError: {e}")
                 raise  # Re-raise to trigger clean exit
             except Exception as e:
                 LOGGER.error(f"Client task failed with unexpected exception: {e}", exc_info=True)
@@ -481,11 +479,11 @@ def run() -> None:
         LOGGER.info("Shutdown complete")
         sys.exit(0)
     except Exception as e:
-        # Check if this is a StdioSubprocessTerminated exception
+        # Check if this is a StdioSubprocessTerminatedError exception
         # First-Party
-        from mcp_reverse_proxy.client import StdioSubprocessTerminated
+        from mcp_reverse_proxy.client import StdioSubprocessTerminatedError
 
-        if isinstance(e, StdioSubprocessTerminated):
+        if isinstance(e, StdioSubprocessTerminatedError):
             LOGGER.error(f"Stdio subprocess terminated: {e}")
             LOGGER.info("Exiting so process supervisor can restart with fresh subprocess")
             sys.exit(1)
