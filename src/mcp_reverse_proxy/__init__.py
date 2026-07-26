@@ -7,16 +7,18 @@ MCP Reverse Proxy - Bridge MCP servers to remote gateways.
 """
 
 from mcp_reverse_proxy.base import (
-    ConnectionState,
-    GatewayTransport,
-    McpServerTransport,
-    MessageType,
+ConnectionState,
+GatewayTransport,
+McpServerTransport,
+MessageType,
 )
+from mcp_reverse_proxy.client import ReverseProxyClient
 
 __all__ = [
-    "ConnectionState",
-    "GatewayTransport",
-    "McpServerTransport",
+"ConnectionState",
+"GatewayTransport",
+"McpServerTransport",
     "MessageType",
+    "ReverseProxyClient",
 ]
 
