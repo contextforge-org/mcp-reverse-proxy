@@ -60,6 +60,29 @@ jobs:
       - name: Run tests
         run: uv run pytest tests/ -q
 
+  integration:
+    name: integration tests (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install package with dev and integration dependencies
+        run: |
+          uv venv
+          uv pip install -e ".[dev,integration]"
+
+      - name: Run integration tests
+        run: uv run pytest tests/integration -q
+
   build:
     name: Build wheel + sdist
     runs-on: ubuntu-latest
