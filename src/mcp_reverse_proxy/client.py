@@ -390,7 +390,10 @@ class ReverseProxyClient:
     async def _handle_gateway_message(self, message: str) -> None:
         """Handle message from gateway."""
         try:
-            LOGGER.debug(f"Handling gateway message: {message[:200]}...")
+            # Never log the raw frame: request envelopes may carry downstream credentials
+            # in `authentication`. Frame size is the safe debug metadata here; the parsed
+            # message keys / auth-presence lines below carry the rest.
+            LOGGER.debug(f"Handling gateway message: {len(message)} bytes")
             data = orjson.loads(message)
             msg_type = data.get("type")
 
@@ -407,10 +410,12 @@ class ReverseProxyClient:
                 if authentication:
                     LOGGER.info(f"[REVERSE_PROXY_CLIENT] ✓ Gateway provided authentication (type: {auth_type})")
                     LOGGER.info(f"[REVERSE_PROXY_CLIENT] ✓ Auth headers: {list(authentication.keys())}")
-                    # Store authentication for this request, passing auth_type for proper formatting
-                    self.mcp_transport.set_authentication(authentication, auth_type)
                 else:
                     LOGGER.warning("[REVERSE_PROXY_CLIENT] ✗ NO authentication in gateway message")
+
+                # Every request explicitly sets adapter auth state: an empty mapping clears any
+                # credentials a previous authenticated request installed before the downstream send.
+                self.mcp_transport.set_authentication(authentication or {}, auth_type)
 
                 LOGGER.info(f"[REVERSE_PROXY_CLIENT] Gateway request payload: {payload}")
                 LOGGER.info("=" * 80)
@@ -505,9 +510,11 @@ class ReverseProxyClient:
                         pending = self._pending_reregistration_request
                         self._pending_reregistration_request = None
 
-                        # Restore authentication headers for the retry
-                        if pending.get("authentication"):
-                            self.mcp_transport.set_authentication(pending["authentication"], pending.get("authType"))
+                        # Restore authentication state for the retry: a pending request that carried
+                        # no credentials must clear any auth a later frame may have installed.
+                        self.mcp_transport.set_authentication(
+                            pending.get("authentication") or {}, pending.get("authType")
+                        )
 
                         # Retry the original request with the new session
                         try:

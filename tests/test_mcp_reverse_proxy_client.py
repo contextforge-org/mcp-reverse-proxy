@@ -229,6 +229,114 @@ async def test_handle_gateway_request_sets_auth_and_forwards_to_mcp(proxy_client
 
 
 @pytest.mark.asyncio
+async def test_handle_gateway_request_never_logs_authentication_material(proxy_client, caplog) -> None:
+    """A gateway request frame carrying authentication must not leak credential values into logs."""
+    # Standard
+    import logging
+
+    marker = "syNTHETIC-credential-marker-7f3a9b"
+    message = (
+        '{"type":"request","payload":{"jsonrpc":"2.0","id":21,"method":"tools/call"},'
+        f'"authentication":{{"Authorization":"Bearer {marker}"}},"authType":"bearer"}}'
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="mcp_reverse_proxy.client"):
+        await proxy_client._handle_gateway_message(message)
+
+    # Authentication is still applied downstream.
+    proxy_client.mcp_transport.set_authentication.assert_called_once_with(
+        {"Authorization": f"Bearer {marker}"}, "bearer"
+    )
+    proxy_client.mcp_transport.send.assert_awaited_once()
+    # Safe metadata logging remains useful (auth presence, header NAMES, message keys).
+    assert "Authentication present: True" in caplog.text
+    assert "Authorization" in caplog.text
+    # The credential value never appears in any captured log record.
+    assert marker not in caplog.text
+
+
+# First-Party
+from mcp_reverse_proxy.transports.sse_adapter import SseAdapter  # noqa: E402
+from mcp_reverse_proxy.transports.streamablehttp_adapter import StreamableHttpAdapter  # noqa: E402
+
+
+def _client_with_adapter(adapter, gateway_transport) -> ReverseProxyClient:
+    """Build a client driven by a REAL adapter (real auth state machine) with a fake gateway side."""
+    return ReverseProxyClient(
+        mcp_transport=adapter,
+        gateway_transport=gateway_transport,
+        session_id="session-12345678",
+        server_name="Test Server",
+        server_description="Test Description",
+        reconnect_delay=0.01,
+        keepalive_interval=0.01,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_cls", [StreamableHttpAdapter, SseAdapter], ids=["streamablehttp", "sse"])
+async def test_no_auth_frame_clears_stale_adapter_authentication(transports, adapter_cls) -> None:
+    """An authenticated frame followed by a no-auth frame must clear adapter auth state before the second send."""
+    _, gateway_transport = transports
+    adapter = adapter_cls("http://downstream.example/mcp")
+    adapter.send = AsyncMock()  # real auth state machine; network send mocked out
+    client = _client_with_adapter(adapter, gateway_transport)
+
+    await client._handle_gateway_message(
+        '{"type":"request","payload":{"jsonrpc":"2.0","id":31,"method":"tools/call"},'
+        '"authentication":{"Authorization":"Bearer stale-seq-marker"},"authType":"bearer"}'
+    )
+    assert adapter._auth_headers == {"Authorization": "Bearer stale-seq-marker"}
+
+    await client._handle_gateway_message('{"type":"request","payload":{"jsonrpc":"2.0","id":32,"method":"tools/call"}}')
+
+    assert adapter._auth_headers == {}
+    assert adapter.send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_after_reregistration_does_not_resurrect_stale_authentication(transports, monkeypatch) -> None:
+    """A pending no-auth request must be retried with cleared auth even when a later frame re-authenticated the adapter."""
+    _, gateway_transport = transports
+    adapter = StreamableHttpAdapter("http://downstream.example/mcp")
+    client = _client_with_adapter(adapter, gateway_transport)
+    monkeypatch.setattr(client, "_check_mcp_server_health", AsyncMock(return_value=True))
+    monkeypatch.setattr(client, "_register", AsyncMock())
+
+    # Frame A: authenticated, sends cleanly.
+    adapter.send = AsyncMock()
+    await client._handle_gateway_message(
+        '{"type":"request","payload":{"jsonrpc":"2.0","id":33,"method":"tools/call"},'
+        '"authentication":{"Authorization":"Bearer retry-marker-a"},"authType":"bearer"}'
+    )
+    assert adapter._auth_headers == {"Authorization": "Bearer retry-marker-a"}
+
+    # Frame B: no auth, send fails recoverably → stored pending, re-registration triggered.
+    adapter.send = AsyncMock(side_effect=SessionExpiredError("expired"))
+    await client._handle_gateway_message('{"type":"request","payload":{"jsonrpc":"2.0","id":34,"method":"tools/call"}}')
+    pending = client._pending_reregistration_request
+    assert pending is not None
+    assert pending["authentication"] is None
+
+    # Frame C: a different authenticated request arrives before the retry and re-auths the adapter.
+    adapter.send = AsyncMock()
+    await client._handle_gateway_message(
+        '{"type":"request","payload":{"jsonrpc":"2.0","id":35,"method":"tools/call"},'
+        '"authentication":{"Authorization":"Bearer retry-marker-c"},"authType":"bearer"}'
+    )
+    assert adapter._auth_headers == {"Authorization": "Bearer retry-marker-c"}
+
+    # Re-registration completes → B is retried. B carried no auth, so state must be cleared first.
+    adapter.send.reset_mock()
+    await client._handle_gateway_message(
+        '{"type":"register_complete","status":"success","sessionId":"session-12345678"}'
+    )
+
+    assert adapter._auth_headers == {}
+    adapter.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_handle_gateway_request_sends_error_when_transport_unavailable_and_health_fails(proxy_client, monkeypatch) -> None:
     """Connection-related MCP errors should return an error when health check fails."""
     proxy_client.mcp_transport.send.side_effect = RuntimeError("Not connected")
