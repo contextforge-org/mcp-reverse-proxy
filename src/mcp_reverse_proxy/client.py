@@ -107,6 +107,8 @@ class ReverseProxyClient:
 
         self._keepalive_task: asyncio.Task[None] | None = None
         self._pending_requests: dict[Any, asyncio.Future[Any]] = {}
+        self._gateway_recovering = False
+        self._gateway_recovery_task: asyncio.Task[None] | None = None
 
         # Register message handlers
         self.mcp_transport.add_message_handler(self._handle_mcp_message)
@@ -174,6 +176,11 @@ class ReverseProxyClient:
             with suppress(asyncio.CancelledError):
                 await self._keepalive_task
 
+        if self._gateway_recovery_task:
+            self._gateway_recovery_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._gateway_recovery_task
+
         # Send unregister message
         if await self.gateway_transport.is_connected():
             try:
@@ -216,7 +223,7 @@ class ReverseProxyClient:
                             break
 
                     # Check if gateway is still connected
-                    if not await self.gateway_transport.is_connected():
+                    if not self._gateway_recovering and not await self.gateway_transport.is_connected():
                         LOGGER.warning("Gateway connection lost, triggering reconnection")
                         self.state = ConnectionState.DISCONNECTED
                         break
@@ -294,6 +301,48 @@ class ReverseProxyClient:
         LOGGER.info(f"Sending registration: session={self.session_id}, name={self.server_name}")
         await self.gateway_transport.send(orjson.dumps(register_msg).decode())
         LOGGER.debug(f"Registration message sent: {register_msg}")
+
+    async def _recover_gateway_connection(self) -> None:
+        """Reconnect the gateway transport and re-register on the fresh connection.
+
+        Gateways on the current ContextForge lifecycle contract accept exactly
+        one register frame per WebSocket connection; a duplicate register is
+        answered with an error frame and a policy-violation close. Session
+        recovery therefore re-establishes the connection before re-registering,
+        which stays compatible with both legacy and current gateways.
+        Concurrent triggers collapse into a single reconnect.
+        """
+        if self._gateway_recovering:
+            LOGGER.info("[GATEWAY_RECOVERY] Recovery already in progress, skipping duplicate trigger")
+            return
+        self._gateway_recovering = True
+        try:
+            await self.gateway_transport.disconnect()
+            await self.gateway_transport.connect()
+            self._registration_successful = False
+            await self._register()
+        finally:
+            self._gateway_recovering = False
+
+    def _schedule_gateway_recovery(self) -> None:
+        """Schedule gateway connection recovery as a background task.
+
+        Gateway message handlers run inside the gateway transport's receive
+        task, which the reconnect cancels and replaces, so the recovery cannot
+        be awaited from that context. A failure is logged and left to the
+        supervisor loop in run_with_reconnect(), which performs a full
+        reconnect on its next poll.
+        """
+        if self._gateway_recovery_task is not None and not self._gateway_recovery_task.done():
+            return
+
+        async def _recover() -> None:
+            try:
+                await self._recover_gateway_connection()
+            except Exception as e:
+                LOGGER.error(f"[GATEWAY_RECOVERY] Gateway reconnect failed: {e}")
+
+        self._gateway_recovery_task = asyncio.create_task(_recover())
 
     async def _handle_mcp_message(self, message: str) -> None:
         """Handle message from MCP server."""
@@ -419,10 +468,15 @@ class ReverseProxyClient:
                         "authType": auth_type,
                     }
 
-                    LOGGER.info("[REVERSE_PROXY_CLIENT] Triggering re-registration with gateway...")
+                    LOGGER.info("[REVERSE_PROXY_CLIENT] Triggering gateway reconnect for re-registration...")
                     self._registration_successful = False
-                    await self._register()
-                    LOGGER.info("[REVERSE_PROXY_CLIENT] Re-registration triggered, returning from handler")
+                    # Re-register over a fresh connection: current gateways
+                    # accept one register frame per connection and answer a
+                    # duplicate with an error frame and a policy close. The
+                    # reconnect is scheduled, not awaited, because this handler
+                    # runs inside the receive task the reconnect must replace.
+                    self._schedule_gateway_recovery()
+                    LOGGER.info("[REVERSE_PROXY_CLIENT] Re-registration scheduled, returning from handler")
                     return
 
             elif msg_type == MessageType.HEARTBEAT.value:
@@ -650,20 +704,13 @@ class ReverseProxyClient:
                     self._mcp_server_healthy = True
                     self._consecutive_mcp_failures = 0
 
-                    # Always re-register when MCP recovers to trigger new initialization
-                    if not await self.gateway_transport.is_connected():
-                        LOGGER.info(f"[HEARTBEAT_RECOVERY] Session {self.session_id[:8]}... | Gateway disconnected, reconnecting before re-registration")
-                        try:
-                            await self.gateway_transport.connect()
-                        except Exception as e:
-                            LOGGER.error(f"[HEARTBEAT_RECOVERY] Session {self.session_id[:8]}... | Failed to reconnect to gateway: {e}")
-                            continue
-
-                    # Re-register to trigger new MCP initialization sequence
+                    # Re-register over a fresh gateway connection to trigger the
+                    # new initialization sequence: current gateways accept one
+                    # register frame per connection, so an in-place re-register
+                    # would be rejected with an error frame and a policy close.
                     try:
-                        LOGGER.info(f"[HEARTBEAT_RECOVERY] Session {self.session_id[:8]}... | Sending re-registration to gateway")
-                        self._registration_successful = False
-                        await self._register()
+                        LOGGER.info(f"[HEARTBEAT_RECOVERY] Session {self.session_id[:8]}... | Reconnecting gateway for re-registration")
+                        await self._recover_gateway_connection()
                         LOGGER.info(f"[HEARTBEAT_RECOVERY] Session {self.session_id[:8]}... | Re-registration sent, gateway will initialize MCP server")
                     except Exception as e:
                         LOGGER.error(f"[HEARTBEAT_RECOVERY] Session {self.session_id[:8]}... | Failed to re-register with gateway: {e}")

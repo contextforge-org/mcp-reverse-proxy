@@ -244,7 +244,7 @@ async def test_handle_gateway_request_sends_error_when_transport_unavailable_and
 
 @pytest.mark.asyncio
 async def test_handle_gateway_request_stores_pending_and_reregisters_when_health_recovers(proxy_client, monkeypatch) -> None:
-    """Recoverable transport errors should save the request and trigger re-registration."""
+    """Recoverable transport errors should save the request and re-register over a fresh gateway connection."""
     proxy_client.mcp_transport.send.side_effect = SessionExpiredError("expired")
     register_mock = AsyncMock()
     monkeypatch.setattr(proxy_client, "_check_mcp_server_health", AsyncMock(return_value=True))
@@ -260,7 +260,91 @@ async def test_handle_gateway_request_stores_pending_and_reregisters_when_health
         "authType": "bearer",
     }
     assert proxy_client._registration_successful is False
+    assert proxy_client._gateway_recovery_task is not None
+    await proxy_client._gateway_recovery_task
+
+    proxy_client.gateway_transport.disconnect.assert_awaited_once()
+    proxy_client.gateway_transport.connect.assert_awaited_once()
     register_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recover_gateway_connection_reconnects_even_when_connected(proxy_client, monkeypatch) -> None:
+    """Recovery must replace a live connection because register is one-shot per connection."""
+    register_mock = AsyncMock()
+    monkeypatch.setattr(proxy_client, "_register", register_mock)
+
+    await proxy_client._recover_gateway_connection()
+
+    proxy_client.gateway_transport.disconnect.assert_awaited_once()
+    proxy_client.gateway_transport.connect.assert_awaited_once()
+    register_mock.assert_awaited_once()
+    assert proxy_client._gateway_recovering is False
+
+
+@pytest.mark.asyncio
+async def test_recover_gateway_connection_collapses_concurrent_triggers(proxy_client, monkeypatch) -> None:
+    """A second recovery trigger while one runs must not reconnect twice."""
+    register_mock = AsyncMock()
+    monkeypatch.setattr(proxy_client, "_register", register_mock)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _blocking_disconnect() -> None:
+        started.set()
+        await release.wait()
+
+    proxy_client.gateway_transport.disconnect.side_effect = _blocking_disconnect
+
+    first = asyncio.create_task(proxy_client._recover_gateway_connection())
+    await started.wait()
+    await proxy_client._recover_gateway_connection()
+    release.set()
+    await first
+
+    proxy_client.gateway_transport.disconnect.assert_awaited_once()
+    proxy_client.gateway_transport.connect.assert_awaited_once()
+    register_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_schedule_gateway_recovery_coalesces_into_single_task(proxy_client, monkeypatch) -> None:
+    """Repeated scheduled recoveries should share one background reconnect."""
+    register_mock = AsyncMock()
+    monkeypatch.setattr(proxy_client, "_register", register_mock)
+
+    proxy_client._schedule_gateway_recovery()
+    proxy_client._schedule_gateway_recovery()
+    task = proxy_client._gateway_recovery_task
+    assert task is not None
+    await task
+
+    proxy_client.gateway_transport.disconnect.assert_awaited_once()
+    proxy_client.gateway_transport.connect.assert_awaited_once()
+    register_mock.assert_awaited_once()
+    assert proxy_client._gateway_recovery_task is not None
+    assert proxy_client._gateway_recovery_task.done()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancels_pending_gateway_recovery(proxy_client) -> None:
+    """A full disconnect should cancel an in-flight recovery reconnect."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _blocking_disconnect() -> None:
+        started.set()
+        await release.wait()
+
+    proxy_client.gateway_transport.disconnect.side_effect = _blocking_disconnect
+    proxy_client._schedule_gateway_recovery()
+    await started.wait()
+    proxy_client.gateway_transport.disconnect.side_effect = None
+
+    await proxy_client.disconnect()
+
+    assert proxy_client._gateway_recovery_task is not None
+    assert proxy_client._gateway_recovery_task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -495,6 +579,30 @@ async def test_run_with_reconnect_breaks_when_gateway_disconnects(proxy_client, 
     assert proxy_client.retry_count == 1
     assert call_count == 2
 
+@pytest.mark.asyncio
+async def test_run_with_reconnect_ignores_gateway_drop_during_recovery(proxy_client, monkeypatch) -> None:
+    """The supervisor loop must not double-connect while a recovery reconnect runs."""
+    call_count = 0
+
+    async def _fake_connect() -> None:
+        nonlocal call_count
+        call_count += 1
+        proxy_client.state = ConnectionState.CONNECTED
+        proxy_client._keepalive_task = None
+        proxy_client._gateway_recovering = True
+        proxy_client.gateway_transport.is_connected.return_value = False
+
+    async def _fake_sleep(_delay: float) -> None:
+        proxy_client.state = ConnectionState.SHUTTING_DOWN
+
+    monkeypatch.setattr(proxy_client, "connect", _fake_connect)
+    monkeypatch.setattr(proxy_client, "_check_mcp_server_health", AsyncMock(return_value=True))
+    monkeypatch.setattr(client_mod.asyncio, "sleep", _fake_sleep)
+
+    await proxy_client.run_with_reconnect()
+
+    assert call_count == 1
+
 
 @pytest.mark.asyncio
 async def test_run_with_reconnect_marks_mcp_unhealthy_when_transport_disconnects(proxy_client, monkeypatch) -> None:
@@ -719,7 +827,7 @@ async def test_keepalive_loop_sends_heartbeat_when_mcp_is_healthy(proxy_client, 
 
 @pytest.mark.asyncio
 async def test_keepalive_loop_recovers_and_reregisters_when_mcp_returns(proxy_client, monkeypatch) -> None:
-    """Recovered MCP server should reconnect gateway if needed and re-register."""
+    """Recovered MCP server should reconnect the gateway and re-register on the fresh connection."""
     proxy_client.state = ConnectionState.CONNECTED
     proxy_client.keepalive_interval = 0
     proxy_client._mcp_server_healthy = False
@@ -739,6 +847,7 @@ async def test_keepalive_loop_recovers_and_reregisters_when_mcp_returns(proxy_cl
 
     proxy_client.gateway_transport.connect.assert_awaited_once()
     register_mock.assert_awaited_once()
+    proxy_client.gateway_transport.disconnect.assert_awaited_once()
     assert proxy_client._mcp_server_healthy is True
     assert proxy_client._consecutive_mcp_failures == 0
     proxy_client.gateway_transport.send.assert_awaited_once()
