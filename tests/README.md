@@ -17,12 +17,22 @@ The tests were moved from `tests/unit/mcpgateway/test_mcp_reverse_proxy_*` to th
 - `test_mcp_reverse_proxy_websocket_adapter.py` - Tests for WebSocket transport adapter
 
 ## Running Tests
-
 From the repository root:
 ```bash
 pytest tests/
 ```
 
+## Integration Tests
+
+`tests/integration/` contains end-to-end tests that run the real transport adapters (stdio, SSE, Streamable HTTP) against a live FastMCP companion server (`companion_server.py`), plus a full reverse-proxy round-trip test using a fake in-process WebSocket gateway.
+
+They require the `integration` optional extra:
+```bash
+pip install -e ".[dev,integration]"
+pytest tests/integration/
+```
+
+Without the extra, the integration test modules are skipped automatically, so the unit-test suite runs unchanged. In CI they run as a separate non-blocking job.
 ## Import Changes
 
 All imports have been updated from:

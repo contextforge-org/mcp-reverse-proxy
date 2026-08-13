@@ -70,6 +70,10 @@ dev = [
     "ruff>=0.9.1",
     "black>=25.1.0"
 ]
+integration = [
+    "fastmcp>=3.4.7",
+    "uvicorn>=0.30.0"
+]
 
 # ----------------------------------------------------------------
 # Console scripts
@@ -126,4 +130,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "integration: end-to-end integration tests against a live FastMCP companion server (requires the 'integration' extra)",
+]
 addopts = "-v --cov=mcp_reverse_proxy --cov-report=term-missing"
