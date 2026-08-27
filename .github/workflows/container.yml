@@ -1,0 +1,516 @@
+name: Container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # contextforge-org/mcp-reverse-proxy (already lowercase)
+  # Trivy runs containerized (same pinned image locally and in CI); resolve
+  # the digest per the todo-3 instructions and record the version here.
+  TRIVY_IMAGE: aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 # aquasec/trivy 0.74.0
+
+jobs:
+  build-smoke:
+    name: Build + smoke test (no push)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false   # never leave GITHUB_TOKEN in .git/config - a hostile PR could rewrite .dockerignore to smuggle it into the build context
+      - name: Install + verify buildx (pre-verified before ANY execution)
+        env:
+          BUILDX_VERSION: v0.36.1             # exact release authorized by the todo-3 Sigstore bundle verification
+          BUILDX_SHA256: 48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778      # record only after exact-asset bundle verification succeeds
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.docker/cli-plugins"
+          tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+          curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" -o "$tmp"
+          echo "$BUILDX_SHA256  $tmp" | shasum -a 256 -c -
+          install -m 0755 "$tmp" "$HOME/.docker/cli-plugins/docker-buildx"
+          docker buildx version   # proves availability: with no `version:`, setup-buildx-action (v3 src/main.ts) downloads ONLY when this fails and never integrity-checks the plugin - our shasum above is the trust anchor; re-verified after the action below
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          driver-opts: image=moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+        # The action performs NO integrity check on the preinstalled plugin (v3 src/main.ts:
+        # empty version => download ONLY if `docker buildx` is unavailable; a fallback install
+        # lands at this same path). Fail closed if the verified binary was replaced.
+      - name: Assert buildx binary unchanged post-setup
+        env:
+          BUILDX_SHA256: 48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778
+        run: |
+          set -euo pipefail
+          echo "$BUILDX_SHA256  $HOME/.docker/cli-plugins/docker-buildx" | shasum -a 256 -c -
+      - name: Build image (linux/amd64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: linux/amd64
+          load: true
+          pull: true   # refresh the deliberately-floating UBI bases on every build
+          tags: mcp-reverse-proxy:ci
+          cache-from: type=gha,scope=container
+          cache-to: type=gha,mode=max,scope=container
+      - name: Smoke - CLI help exits 0
+        run: |
+          docker run --rm mcp-reverse-proxy:ci --help > smoke-help.txt
+          grep 'Bridge MCP servers' smoke-help.txt >/dev/null
+      - name: Smoke - runs as non-root UID 1001
+        run: |
+          docker run --rm --entrypoint id mcp-reverse-proxy:ci > smoke-id.txt
+          grep 'uid=1001' smoke-id.txt >/dev/null
+      - name: Smoke - uvx and git available for stdio MCP servers
+        run: |
+          docker run --rm --entrypoint uvx mcp-reverse-proxy:ci --version
+          docker run --rm --entrypoint git mcp-reverse-proxy:ci --version
+      - name: Smoke - venv wins over the inherited s2i activation
+        run: docker run --rm --entrypoint sh mcp-reverse-proxy:ci -c 'test "$VIRTUAL_ENV" = /opt/venv && test "$(command -v python)" = /opt/venv/bin/python'
+      - name: Smoke - bad flag fails with usage (non-zero exit)
+        run: |
+          if docker run --rm mcp-reverse-proxy:ci --bogus-flag >smoke.log 2>&1; then
+            echo "expected non-zero exit for --bogus-flag" >&2
+            exit 1
+          fi
+          grep -qi "usage" smoke.log
+
+  publish:
+    name: Scan-gated publish to ghcr.io
+    # Publish only from main or v* release tags - never PRs, and never an
+    # arbitrary workflow_dispatch ref (a branch dispatch computes no tags;
+    # the empty-tags refusal below aborts BEFORE any registry login, build,
+    # or push - keeping package credentials out of malformed-ref runs).
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: build-smoke
+    runs-on: ubuntu-latest
+    concurrency:
+      group: container-publish
+      cancel-in-progress: false   # serialize ALL promotions globally; an active run is never cancelled (moving aliases are gone, so cross-tag alias regression is impossible by construction)
+      queue: max                  # queue pending promotions FIFO instead of evicting older ones (GHA ceiling: 100 pending per group; beyond that GitHub cancels new arrivals - accepted). Requires cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write      # push to ghcr.io; also covers BuildKit's registry-native SBOM/provenance attestations (no GitHub attestations API used, so no attestations permission)
+      id-token: write      # keyless cosign (GitHub OIDC)
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false   # never leave GITHUB_TOKEN in .git/config - a hostile PR could rewrite .dockerignore to smuggle it into the build context
+      - name: Reject SemVer build metadata in release refs (would collide after sanitization)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            *+*) echo "FAIL: release tags with SemVer build metadata (+) are not supported - metadata-action strips it and the sanitized tag would collide with the plain version" >&2; exit 1 ;;
+            *) echo "No build metadata in $REF - OK" ;;
+          esac
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          # Pin the emulator image too - setup-qemu otherwise runs the MUTABLE
+          # privileged tonistiigi/binfmt:latest (resolve per todo-3 instructions).
+          image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+      - name: Install + verify buildx (pre-verified before ANY execution)
+        env:
+          BUILDX_VERSION: v0.36.1             # exact release authorized by the todo-3 Sigstore bundle verification
+          BUILDX_SHA256: 48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778      # record only after exact-asset bundle verification succeeds
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.docker/cli-plugins"
+          tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+          curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" -o "$tmp"
+          echo "$BUILDX_SHA256  $tmp" | shasum -a 256 -c -
+          install -m 0755 "$tmp" "$HOME/.docker/cli-plugins/docker-buildx"
+          docker buildx version   # proves availability: with no `version:`, setup-buildx-action (v3 src/main.ts) downloads ONLY when this fails and never integrity-checks the plugin - our shasum above is the trust anchor; re-verified after the action below
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          # Pin the BuildKit daemon image - otherwise buildx pulls the MUTABLE
+          # moby/buildkit:latest at runtime (resolve per todo-3 instructions).
+          driver-opts: image=moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+        # The action performs NO integrity check on the preinstalled plugin (v3 src/main.ts:
+        # empty version => download ONLY if `docker buildx` is unavailable; a fallback install
+        # lands at this same path). Fail closed if the verified binary was replaced.
+      - name: Assert buildx binary unchanged post-setup
+        env:
+          BUILDX_SHA256: 48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778
+        run: |
+          set -euo pipefail
+          echo "$BUILDX_SHA256  $HOME/.docker/cli-plugins/docker-buildx" | shasum -a 256 -c -
+      - name: Image metadata (tags)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # metadata-action's default flavor latest=auto would ALSO tag `latest`
+          # on release-tag builds - forbid it; `latest` moves only via the
+          # explicit main-only raw rule below.
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=long,enable=${{ github.ref == 'refs/heads/main' }}   # full-length sha: unique per commit, effectively immutable
+            # Releases publish only the FULL version (immutable per release) - NO
+            # moving major/minor aliases exist, so an alias can never regress.
+      - name: Refuse refs that produce no tags (before any build/push)
+        env:
+          REF: ${{ github.ref }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          if [ -z "${TAGS//[[:space:]]/}" ]; then
+            echo "metadata-action computed no tags for $REF - aborting before any login, build, or push" >&2
+            exit 1
+          fi
+          echo "Tags to apply post-gate:"
+          echo "$TAGS"
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse to overwrite an existing release tag unless it verifiably resumes the same commit (immutability)
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        id: immutable-check
+        env:
+          REF: ${{ github.ref }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" = "refs/heads/main" ]; then
+            tag="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$GITHUB_SHA"   # main's immutable tag is the full-length commit sha
+          else
+            tag=$(echo "$TAGS" | head -1)   # a release's sole tag (flavor latest=false, no sha, no aliases)
+          fi
+          test -n "$tag" || { echo "FAIL: no release tag in metadata for this ref" >&2; exit 1; }
+          if out=$(docker buildx imagetools inspect "$tag" 2>&1); then
+            # Tag exists. Never blindly overwrite: BuildKit provenance/SBOM timestamps
+            # make every rebuild a NEW digest, so the only safe resume is one provably
+            # built from THIS commit (org.opencontainers.image.revision = the git SHA).
+            pdigests=$(docker buildx imagetools inspect "$tag" --format '{{json .}}' | jq -r '.manifest.manifests[] | select(.platform.os=="linux") | .digest')
+            count=$(printf '%s\n' "$pdigests" | grep -c .)
+            test "$count" -eq 2 || { echo "FAIL: expected exactly 2 platform manifests in $tag (found $count)" >&2; exit 1; }
+            archs=$(docker buildx imagetools inspect "$tag" --format '{{json .}}' | jq -r '[.manifest.manifests[] | select(.platform.os=="linux") | .platform.architecture] | sort | join(",")')
+            test "$archs" = "amd64,arm64" || { echo "FAIL: expected amd64+arm64 manifests (found: $archs)" >&2; exit 1; }
+            resume_ok=1
+            while IFS= read -r pd; do
+              rev=$(docker buildx imagetools inspect "${tag%:*}@$pd" --format '{{json .Image.Config.Labels}}' | jq -r '.["org.opencontainers.image.revision"] // ""')   # labels live at .Image.Config.Labels, not .Config.Labels
+              echo "platform digest $pd revision: $rev"
+              [ "$rev" = "$GITHUB_SHA" ] || resume_ok=0
+            done <<< "$pdigests"
+            if [ "$resume_ok" -eq 1 ]; then
+              echo "resume=true" >> "$GITHUB_OUTPUT"
+              echo "resume_tag=$tag" >> "$GITHUB_OUTPUT"
+              echo "RESUME: $tag already exists with this commit's revision on all platforms - verify-only path (see the resume step)"
+            else
+              echo "FAIL: release tag $tag already published for a DIFFERENT commit - refusing to overwrite (immutability)" >&2
+              exit 1
+            fi
+          elif echo "$out" | grep -qiE 'not found|404|no such manifest'; then
+            echo "Release tag $tag absent (verified) - proceeding"
+            echo "resume=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "FAIL: could not verify absence of $tag - treating as existing (fail-closed): $out" >&2
+            exit 1
+          fi
+      - name: Build + push by digest, untagged (amd64 + arm64)
+        if: steps.immutable-check.outputs.resume != 'true'
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: linux/amd64,linux/arm64
+          pull: true   # refresh the deliberately-floating UBI bases on every build
+          # Quote-free CSV: inner quotes would become part of the `name` value
+          # in buildx's parser.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          sbom: generator=docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9 # pinned generator - plain `sbom: true` would pull the MUTABLE stable-1 tag
+          provenance: mode=max
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=container
+          cache-to: type=gha,mode=max,scope=container
+        # Accepted boundary (recorded in Scope - Must NOT have): push-by-digest
+        # makes the image registry-addressable before the scan; this is a TAG
+        # gate, not a publish gate. A failed gate leaves only an untagged
+        # digest (cleanup: rollout note in todo 5).
+      - name: Trivy gate - fixable CRITICAL (both platforms; failures aggregated, not short-circuited)
+        if: steps.immutable-check.outputs.resume != 'true'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy-cache"   # one job-scoped Trivy DB: 4 scans share 1 download
+          # Honor the enforced-expiry ignore file when it exists (Trivy's default
+          # .trivyignore filename would NOT pick up .trivyignore.yaml):
+          EXTRA=()   # argument ARRAY (shellcheck-clean, zsh-safe): an unquoted $IGNORE_ARG string breaks under zsh and trips SC2086 in the mandatory actionlint QA
+          [ -f .trivyignore.yaml ] && EXTRA=(--ignorefile .trivyignore.yaml)
+          if [ -f .trivyignore.yaml ]; then
+            python3 - <<'PY'
+          import sys, yaml
+          doc = yaml.safe_load(open('.trivyignore.yaml'))
+          entries = (doc or {}).get('vulnerabilities') or []
+          assert entries, '.trivyignore.yaml: no vulnerabilities entries'
+          for i, e in enumerate(entries):
+              for key in ('id', 'statement', 'expired_at'):
+                  assert e.get(key), f'.trivyignore.yaml entry {i}: missing/empty {key}'
+              assert e.get('purls') or e.get('paths'), f'.trivyignore.yaml entry {i}: must scope to purls or paths'
+          print(f'.trivyignore.yaml: {len(entries)} scoped, expiring entries validated')
+          PY
+          fi   # machine-validated: an unscoped/unexpiring exception FAILS the gate instead of silently weakening it (python3 + PyYAML are preinstalled on ubuntu-latest)
+          failed=0
+          for platform in linux/amd64 linux/arm64; do
+            echo "::group::Trivy gate (fixable CRITICAL) $platform"
+            docker run --rm \
+              -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" \
+              -v "$RUNNER_TEMP/trivy-cache:/root/.cache" \
+              -v "$PWD:/repo" -w /repo \
+              "$TRIVY_IMAGE" image --platform "$platform" --severity CRITICAL --ignore-unfixed \
+              --exit-code 1 --scanners vuln "${EXTRA[@]}" "$DIGEST_REF" || failed=1
+            echo "::endgroup::"
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Fixable CRITICAL vulnerabilities found - see grouped scans above" >&2
+            exit 1
+          fi
+      - name: Trivy report - ALL CRITICAL incl. unfixed (informational; runs even when the gate fails)
+        if: always() && steps.build.outcome == 'success'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            echo "::group::Trivy report (ALL CRITICAL) $platform"
+            docker run --rm \
+              -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" \
+              -v "$RUNNER_TEMP/trivy-cache:/root/.cache" \
+              "$TRIVY_IMAGE" image --platform "$platform" --severity CRITICAL \
+              --ignorefile /dev/null --exit-code 0 --scanners vuln "$DIGEST_REF"
+            echo "::endgroup::"
+          done
+        # Policy: the GATE ignores only findings with no available fix and honors a
+        # root `.trivyignore.yaml` (mounted /repo) whose entries carry id + purls (or paths) -
+        # statement, and expired_at, and are SCOPED to exact purls/paths (an unscoped id
+        # resurfaces and FAILS the gate, forcing re-triage). The REPORT bypasses
+        # ignores (--ignorefile /dev/null) so EVERY CRITICAL stays visible. Create
+        # the file ONLY for a genuine false positive; if created, commit it with this workflow (Scope Must have).
+      - name: Install cosign
+        if: steps.immutable-check.outputs.resume != 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Sign the image digest (keyless, GitHub OIDC)
+        if: steps.immutable-check.outputs.resume != 'true'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$DIGEST_REF"
+      - name: Verify the signature before any tag exists
+        if: steps.immutable-check.outputs.resume != 'true'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: >-
+          cosign verify "$DIGEST_REF"
+          --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+          --certificate-identity-regexp='^https://github\.com/contextforge-org/mcp-reverse-proxy/\.github/workflows/container\.yml@refs/(heads/main|tags/v.*)$'
+      - name: Verify per-platform SBOM + provenance attestations on the pushed digest (before any tag)
+        if: steps.immutable-check.outputs.resume != 'true'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          sbom=$(docker buildx imagetools inspect "$DIGEST_REF" --format '{{json .SBOM}}')
+          printf '%s\n' "$sbom" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SPDX")) and (."linux/arm64" | has("SPDX"))'
+          prov=$(docker buildx imagetools inspect "$DIGEST_REF" --format '{{json .Provenance}}')
+          printf '%s\n' "$prov" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SLSA")) and (."linux/arm64" | has("SLSA"))'
+      - name: Pre-tag smoke on the exact signed digest (both platforms, via QEMU)
+        if: steps.immutable-check.outputs.resume != 'true'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            echo "::group::Pre-tag smoke $platform"
+            f="smoke-$(echo "$platform" | tr '/' '-').txt"   # linux/amd64 contains a slash - a literal smoke-$platform.txt path would not exist
+            docker run --rm --platform "$platform" "$DIGEST_REF" --help > "$f"
+            grep 'Bridge MCP servers' "$f" >/dev/null
+            docker run --rm --platform "$platform" --entrypoint uvx "$DIGEST_REF" --version
+            docker run --rm --platform "$platform" --entrypoint git "$DIGEST_REF" --version
+            docker run --rm --platform "$platform" --entrypoint id "$DIGEST_REF" > "id-$(echo "$platform" | tr '/' '-').txt"
+            grep 'uid=1001' "id-$(echo "$platform" | tr '/' '-').txt" >/dev/null
+            docker run --rm --platform "$platform" --entrypoint sh "$DIGEST_REF" -c 'touch "$HOME/.w" && touch "$UV_CACHE_DIR/.w" && rm -f "$HOME/.w" "$UV_CACHE_DIR/.w"'
+            docker run --rm --platform "$platform" --entrypoint sh "$DIGEST_REF" -c 'test "$VIRTUAL_ENV" = /opt/venv && test "$(command -v python)" = /opt/venv/bin/python'
+            echo "::endgroup::"
+          done
+        # The PR build-smoke job is amd64-only; this runs the SIGNED digest on
+        # BOTH arches before any tag exists, so a broken arm64 venv/shebang/
+        # console script can never be scanned, signed, and tagged clean.
+      - name: Apply tags (only after the scan gate passes AND the signature verifies)
+        if: steps.immutable-check.outputs.resume != 'true'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          REF: ${{ github.ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # for the stale-main gh api guard below
+        run: |
+          set -euo pipefail
+          # Stale-main guard: an older queued main run must never regress `latest`.
+          # (Immutable release tags are unaffected - they carry no floating alias.)
+          if [ "$REF" = "refs/heads/main" ]; then
+            current=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)
+            if [ "$current" != "$GITHUB_SHA" ]; then
+              echo "stale main run ($GITHUB_SHA; main is now $current) - applying sha tag only, skipping latest"
+              TAGS=$(echo "$TAGS" | grep -v ':latest$' || true)
+            fi
+          fi
+          # Phase 1: preflight EVERY immutable tag before ANY mutation (a failure AFTER an
+          # earlier tag already moved is the race this two-phase structure closes).
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            # Immutable tags (full sha, full release version) may already exist ONLY if they
+            # point at THIS digest; a different digest means a hijack or a bug - fail closed.
+            case "$tag" in
+              *:latest) ;;  # latest moves forward on main by design (stale-main guard above)
+              *)
+                if out=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>&1); then
+                  if [ "$out" != "${{ steps.build.outputs.digest }}" ]; then
+                    echo "FAIL: immutable tag $tag already exists at a DIFFERENT digest ($out)" >&2
+                    exit 1
+                  fi
+                  echo "$tag already points at this digest - leaving as is"
+                elif echo "$out" | grep -qiE 'not found|404|no such manifest'; then
+                  :  # recognized absence - tag below
+                else
+                  echo "FAIL: could not inspect $tag (fail-closed): $out" >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done <<< "$TAGS"
+          # Phase 2: create tags - immutable tags FIRST, `latest` LAST (a late failure
+          # leaves the rolling tag untouched rather than half-promoted).
+          # ASSUMPTION (documented, accepted): GHCR has no compare-and-swap, so a CONCURRENT
+          # writer to the same tag between preflight and create is out of scope; `queue: max` serializes OUR runs.
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            # TOCTOU: re-verify main freshness immediately before ANY latest mutation
+            # (the earlier stale-main guard predates the immutable preflight/creation).
+            case "$tag" in
+              *:latest)
+                current=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)
+                if [ "$current" != "$GITHUB_SHA" ]; then
+                  echo "main moved since this run started ($current) - skipping $tag"
+                  TAGS=$(echo "$TAGS" | grep -v ':latest$' || true)   # strip it so the post-loop primary computation falls back to the immutable sha tag (PUBLISHED_PRIMARY_TAG must never claim an unpublished tag)
+                  continue
+                fi
+                ;;
+            esac
+            if out=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>&1); then
+              if [ "$out" = "${{ steps.build.outputs.digest }}" ]; then
+                echo "$tag already points at this digest - leaving as is"
+              else
+                case "$tag" in
+                  *:latest)
+                    echo "$tag exists at a different digest - moving it forward to the signed digest (rolling alias; the stale-main guard already ran)"
+                    docker buildx imagetools create -t "$tag" "$DIGEST_REF"
+                    created=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')
+                    test "$created" = "${{ steps.build.outputs.digest }}" || { echo "FAIL: $tag does not point at the signed digest immediately after create" >&2; exit 1; }
+                    ;;
+                  *)
+                    echo "FAIL: immutable tag $tag moved to a DIFFERENT digest ($out) between preflight and create" >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+            elif echo "$out" | grep -qiE 'not found|404|no such manifest'; then
+              echo "Tagging $DIGEST_REF as $tag"
+              docker buildx imagetools create -t "$tag" "$DIGEST_REF"
+              created=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')
+              test "$created" = "${{ steps.build.outputs.digest }}" || { echo "FAIL: $tag does not point at the signed digest immediately after create" >&2; exit 1; }   # verify EVERY resulting tag right after creating it
+            else
+              echo "FAIL: could not inspect $tag before create (fail-closed): $out" >&2
+              exit 1
+            fi
+          done < <( { echo "$TAGS" | grep -v ':latest$' || true; echo "$TAGS" | grep ':latest$' || true; } )   # process substitution: keeps `primary` in the current shell
+          # Primary tag is chosen independently of creation order: `latest` on main (when not
+          # stripped by the stale-main guard), otherwise the first tag in the list.
+          primary=$(echo "$TAGS" | grep ':latest$' | head -1 || true)
+          [ -z "$primary" ] && primary=$(echo "$TAGS" | head -1)
+          # Machine-readable labels for post-publish verification (grep these
+          # from `gh run view --log`; the primary tag is `latest` on main and
+          # the full semver tag on v* releases):
+          echo "PUBLISH_DIGEST=${{ steps.build.outputs.digest }}"
+          echo "PUBLISHED_PRIMARY_TAG=$primary"
+      - name: Install cosign (resume path)
+        if: steps.immutable-check.outputs.resume == 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Resume verification of the existing immutable tag (retry path - verify only, never rebuild or overwrite)
+        if: steps.immutable-check.outputs.resume == 'true'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          REF: ${{ github.ref }}
+          RESUME_TAG: ${{ steps.immutable-check.outputs.resume_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$RESUME_TAG"   # from the immutable check (on main, the metadata list's head may be `latest`)
+          digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')
+          ref="${tag%:*}@$digest"
+          echo "Resuming against EXISTING $ref (this commit's artifact - verified, not rebuilt, not overwritten)"
+          cosign verify "$ref" \
+            --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp='^https://github\.com/contextforge-org/mcp-reverse-proxy/\.github/workflows/container\.yml@refs/(heads/main|tags/v.*)$'
+          sbom=$(docker buildx imagetools inspect "$ref" --format '{{json .SBOM}}')
+          printf '%s\n' "$sbom" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SPDX")) and (."linux/arm64" | has("SPDX"))'
+          prov=$(docker buildx imagetools inspect "$ref" --format '{{json .Provenance}}')
+          printf '%s\n' "$prov" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SLSA")) and (."linux/arm64" | has("SLSA"))'
+          for platform in linux/amd64 linux/arm64; do
+            f="resume-smoke-$(echo "$platform" | tr '/' '-').txt"
+            docker run --rm --platform "$platform" "$ref" --help > "$f"
+            grep 'Bridge MCP servers' "$f" >/dev/null
+          done
+          mkdir -p "$RUNNER_TEMP/trivy-cache"
+          EXTRA=()   # mirror the fresh-publish gate's scoped ignore handling
+          [ -f .trivyignore.yaml ] && EXTRA=(--ignorefile .trivyignore.yaml)
+          if [ -f .trivyignore.yaml ]; then
+            python3 - <<'PY'
+          import sys, yaml
+          doc = yaml.safe_load(open('.trivyignore.yaml'))
+          entries = (doc or {}).get('vulnerabilities') or []
+          assert entries, '.trivyignore.yaml: no vulnerabilities entries'
+          for i, e in enumerate(entries):
+              for key in ('id', 'statement', 'expired_at'):
+                  assert e.get(key), f'.trivyignore.yaml entry {i}: missing/empty {key}'
+              assert e.get('purls') or e.get('paths'), f'.trivyignore.yaml entry {i}: must scope to purls or paths'
+          print(f'.trivyignore.yaml: {len(entries)} scoped, expiring entries validated')
+          PY
+          fi   # same machine validation as the fresh gate
+          failed=0
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" -v "$RUNNER_TEMP/trivy-cache:/root/.cache" -v "$PWD:/repo" -w /repo "$TRIVY_IMAGE" image --platform "$platform" --severity CRITICAL --ignore-unfixed --exit-code 1 --scanners vuln "${EXTRA[@]}" "$ref" || failed=1
+          done
+          [ "$failed" -eq 0 ]
+          if [ "$REF" = "refs/heads/main" ]; then
+            current=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)
+            if [ "$current" = "$GITHUB_SHA" ]; then
+              echo "Reconciling latest -> $digest (stale-main guard passed)"
+              docker buildx imagetools create -t "${tag%:*}:latest" "$ref"
+              created=$(docker buildx imagetools inspect "${tag%:*}:latest" --format '{{.Manifest.Digest}}')
+              test "$created" = "$digest" || { echo "FAIL: latest does not point at the verified digest after reconcile" >&2; exit 1; }
+            else
+              echo "main moved since this run started ($current) - leaving latest where it is"
+            fi
+          fi
+          echo "PUBLISH_DIGEST=$digest"
+          if [ "$REF" = "refs/heads/main" ] && [ "${current:-}" = "$GITHUB_SHA" ]; then
+            echo "PUBLISHED_PRIMARY_TAG=${tag%:*}:latest"
+          else
+            echo "PUBLISHED_PRIMARY_TAG=$tag"
+          fi
