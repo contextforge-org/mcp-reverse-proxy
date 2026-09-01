@@ -19,36 +19,46 @@ from typing import Literal
 from fastmcp import FastMCP
 from starlette.applications import Starlette
 
-mcp = FastMCP("reverse-proxy-companion")
+def create_server() -> FastMCP:
+    """Build a fresh companion FastMCP instance.
+
+    Each HTTP test must get its own instance: FastMCP 4 / mcp 2.x bind
+    lifespan and session state to the instance on the running event loop,
+    so reusing one instance across tests (each test runs on its own loop)
+    lets state from a previous test's loop break the next app's responses
+    ("ASGI callable returned without completing response").
+    """
+    server = FastMCP("reverse-proxy-companion")
+
+    @server.tool()
+    def echo(message: str) -> str:
+        """Echo the message back verbatim."""
+        return message
+
+    @server.tool()
+    def add(a: int, b: int) -> int:
+        """Add two integers."""
+        return a + b
+
+    @server.resource("companion://info")
+    def server_info() -> str:
+        """Static resource identifying the companion server."""
+        return f"reverse-proxy-companion on Python {platform.python_version()}"
+
+    @server.prompt()
+    def greet(name: str) -> str:
+        """Return a greeting prompt for the given name."""
+        return f"Say hello to {name}."
+
+    return server
 
 
-@mcp.tool()
-def echo(message: str) -> str:
-    """Echo the message back verbatim."""
-    return message
-
-
-@mcp.tool()
-def add(a: int, b: int) -> int:
-    """Add two integers."""
-    return a + b
-
-
-@mcp.resource("companion://info")
-def server_info() -> str:
-    """Static resource identifying the companion server."""
-    return f"reverse-proxy-companion on Python {platform.python_version()}"
-
-
-@mcp.prompt()
-def greet(name: str) -> str:
-    """Return a greeting prompt for the given name."""
-    return f"Say hello to {name}."
+mcp = create_server()
 
 
 def create_app(transport: Literal["sse", "streamable-http"]) -> Starlette:
-    """Build the ASGI app for an HTTP transport."""
-    return mcp.http_app(transport=transport)
+    """Build the ASGI app for an HTTP transport on a fresh server instance."""
+    return create_server().http_app(transport=transport)
 
 
 def main() -> None:
