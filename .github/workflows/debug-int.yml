@@ -1,7 +1,8 @@
 name: Debug integration failure (temporary)
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [debug/ci-int-logging]
 
 permissions:
   contents: read
