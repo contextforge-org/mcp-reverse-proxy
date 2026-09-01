@@ -87,10 +87,11 @@ jobs:
 
   publish:
     name: Scan-gated publish to ghcr.io
-    # Publish only from main or v* release tags - never PRs, and never an
-    # arbitrary workflow_dispatch ref (a branch dispatch computes no tags;
-    # the empty-tags refusal below aborts BEFORE any registry login, build,
-    # or push - keeping package credentials out of malformed-ref runs).
+    # Publish only from main or v* release tags - never PRs. workflow_dispatch
+    # from main publishes exactly like a push to main (tags compute normally);
+    # a dispatch from any other ref fails this job-level condition, so no
+    # registry login, build, or push happens for such runs (the empty-tags
+    # refusal below is defense-in-depth on top of this condition).
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: build-smoke
     runs-on: ubuntu-latest
