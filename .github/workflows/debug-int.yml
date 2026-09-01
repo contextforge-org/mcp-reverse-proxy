@@ -59,6 +59,27 @@ jobs:
             uv run pytest tests/integration -q -k "not sse" 2>&1 | tail -2
           done
 
+      - name: P1 sse+streamable only, NO coverage, 4x
+        if: always()
+        run: |
+          for i in 1 2 3 4; do
+            echo "=== P1 iteration $i"
+            uv run pytest tests/integration/test_adapters_integration.py -o addopts="" -q -k "sse or streamable" 2>&1 | tail -2
+          done
+
+      - name: P2 sse+streamable only, coverage ON, 4x
+        if: always()
+        run: |
+          for i in 1 2 3 4; do
+            echo "=== P2 iteration $i"
+            uv run pytest tests/integration/test_adapters_integration.py -q -k "sse or streamable" 2>&1 | tail -2
+          done
+
+      - name: P4 full dir with DEBUG logs, coverage ON, 1x
+        if: always()
+        run: |
+          uv run pytest tests/integration -q --log-cli-level=DEBUG 2>&1 | tail -250
+
       - name: Manual curl repro with server debug log
         if: always()
         run: |
