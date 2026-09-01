@@ -1,0 +1,57 @@
+name: Debug integration failure (temporary)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: |
+          uv venv
+          uv pip install -e ".[dev,integration]"
+          uv pip list | grep -iE "fastmcp|^mcp|httpx|starlette|uvicorn|pytest-asyncio"
+
+      - name: Isolated failing test with live INFO logs
+        if: always()
+        run: |
+          uv run pytest "tests/integration/test_adapters_integration.py::test_full_mcp_session_round_trip[streamable-http]" \
+            -o addopts="" -s --log-cli-level=INFO -p no:cacheprovider 2>&1 | tail -60
+
+      - name: Full dir, exactly as CI (coverage on), 3x
+        if: always()
+        run: |
+          for i in 1 2 3; do
+            echo "=== iteration $i"
+            uv run pytest tests/integration -q -p no:cacheprovider 2>&1 | tail -3
+          done
+
+      - name: Manual curl repro with server debug log
+        if: always()
+        run: |
+          set -x
+          FASTMCP_LOG_LEVEL=DEBUG uv run python tests/integration/companion_server.py \
+            --transport streamable-http --host 127.0.0.1 --port 8765 > server.log 2>&1 &
+          SRV=$!
+          sleep 4
+          for i in 1 2 3 4 5; do
+            echo "=== curl attempt $i"
+            curl -sS -i --max-time 20 -X POST http://127.0.0.1:8765/mcp \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcp-reverse-proxy-integration-tests","version":"0.1.0"}}}' \
+              | head -30 || true
+          done
+          kill $SRV 2>/dev/null || true
+          sleep 1
+          echo "=== server.log"
+          cat server.log
