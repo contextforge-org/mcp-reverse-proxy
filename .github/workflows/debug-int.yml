@@ -36,6 +36,29 @@ jobs:
             uv run pytest tests/integration -q -p no:cacheprovider 2>&1 | tail -3
           done
 
+      - name: Verbatim CI command, 6x
+        if: always()
+        run: |
+          for i in 1 2 3 4 5 6; do
+            echo "=== verbatim iteration $i"
+            uv run pytest tests/integration -q 2>&1 | tail -2
+          done
+
+      - name: Streamable-http alone, 10x
+        if: always()
+        run: |
+          for i in $(seq 1 10); do
+            uv run pytest "tests/integration/test_adapters_integration.py::test_full_mcp_session_round_trip[streamable-http]" -o addopts="" -q 2>&1 | tail -1
+          done
+
+      - name: Full dir without sse param, 3x
+        if: always()
+        run: |
+          for i in 1 2 3; do
+            echo "=== no-sse iteration $i"
+            uv run pytest tests/integration -q -k "not sse" 2>&1 | tail -2
+          done
+
       - name: Manual curl repro with server debug log
         if: always()
         run: |
