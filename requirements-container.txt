@@ -1,4 +1,5 @@
-# locked with cutoff 2026-08-26T18:26:51Z (uv pip compile --generate-hashes --universal --no-build --exclude-newer)
+# locked with cutoff 2026-08-26T18:26:51Z (uv pip compile pyproject.toml .lockgen.in --generate-hashes --universal --no-build --python-version 3.12 --exclude-newer) - regenerate per CONTRIBUTING.md
+# --python-version 3.12 (the image's interpreter) is REQUIRED: without it uv omits typing-extensions (an anyio requirement on Python <3.13) and the image build fails `pip check`.
 anyio==4.14.2 \
     --hash=sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494 \
     --hash=sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f

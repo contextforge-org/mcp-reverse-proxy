@@ -29,8 +29,8 @@ FROM ${PYTHON_BUILDER} AS builder
 # UBI 10 ships no full python-312 s2i image (see header), so the builder is
 # ubi-minimal plus the Python 3.12 RPMs - the mcp-context-forge wheel-image
 # pattern. Dependencies install from the COMMITTED hash-pinned lock file
-# (requirements-container.txt - generated in todo 1 step (a); pure-wheel
-# closure, no compilers needed. Contingency if a dep ever builds from
+# (requirements-container.txt - regeneration documented in CONTRIBUTING.md;
+# pure-wheel closure, no compilers needed. Contingency if a dep ever builds from
 # source: add python3.12-devel gcc to the microdnf line.
 USER root
 WORKDIR /build

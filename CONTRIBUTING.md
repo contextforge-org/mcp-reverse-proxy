@@ -60,6 +60,21 @@ Before submitting changes:
 2. `ruff check .` - lint passes
 3. `mypy src/` - type checks pass
 
+### Container dependency lock
+
+`requirements-container.txt` is the hash-pinned dependency closure installed into the container image (root `Containerfile`). Regenerate and commit it whenever `pyproject.toml` dependencies, `[build-system] requires`, or `.lockgen.in` change:
+
+```bash
+uv pip compile pyproject.toml .lockgen.in \
+  --generate-hashes --universal --no-build --python-version 3.12 \
+  --exclude-newer "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o requirements-container.txt
+```
+
+- `.lockgen.in` seeds the PEP 517 build backend (setuptools/wheel) so the project wheel can build with `pip wheel --no-build-isolation` in the image's builder stage; keep its floors in sync with `[build-system] requires` in `pyproject.toml`.
+- `--python-version 3.12` (the image's interpreter) is **required**: without it uv omits `typing-extensions` (an `anyio` requirement on Python < 3.13) and the image build fails `pip check`.
+- Record the new cutoff date in the lock file's header comment, then verify with `docker build -f Containerfile -t mcp-reverse-proxy .` before committing.
+
 ## Coding Standards
 
 - **Python >= 3.11** with type hints
