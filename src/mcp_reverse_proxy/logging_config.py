@@ -13,7 +13,7 @@ import os
 import socket
 
 # Third-Party
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger.json import JsonFormatter
 
 # Standard log format
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -24,7 +24,7 @@ _CACHED_HOSTNAME: str = socket.gethostname()
 _CACHED_PID: int = os.getpid()
 
 
-class CorrelationIdJsonFormatter(jsonlogger.JsonFormatter):
+class CorrelationIdJsonFormatter(JsonFormatter):
     """JSON formatter with hostname and PID."""
 
     def add_fields(self, log_record: dict, record: logging.LogRecord, message_dict: dict) -> None:
