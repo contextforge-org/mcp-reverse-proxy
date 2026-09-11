@@ -71,6 +71,7 @@ dev = [
     "black>=25.1.0"
 ]
 integration = [
+    # Pinned <4: mcp 2.x streamable-HTTP SSE race (modelcontextprotocol/python-sdk#3494); revert when fixed
     "fastmcp>=3.4.7,<4",
     "uvicorn>=0.30.0"
 ]
