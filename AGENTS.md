@@ -65,6 +65,21 @@ uses line-length 120, target py311.
 - Logging goes through `logging_config.py` (`LoggingService` /
   `CorrelationIdJsonFormatter`), not ad-hoc `logging.getLogger` handlers.
 
+## Upstream issue composition
+
+When drafting issues for external trackers (e.g. dependency bug reports):
+
+- Write in ASD Simplified Technical English (ASD-STE100): short sentences
+  (25 words max for descriptions, 20 for procedures), active voice, no
+  contractions, one instruction per sentence in numbered procedures.
+- Mark unverified claims as inference; state what a section is, not what
+  it is not ("(inference)", not "(not confirmed)").
+- Omit repo-local context (CI history, internal infrastructure): the
+  audience is external. Note only that the behavior was observed in CI
+  and reproduction environments. Focus on the defect and its mechanism.
+- Make positive statements only: facts and observations, never claims
+  about what is not the cause.
+
 ## Contribution workflow
 
 - Open an issue before a PR (bugs and features both). Do not implement
