@@ -518,38 +518,27 @@ sudo systemctl start mcp-reverse-proxy
 sudo systemctl status mcp-reverse-proxy
 ```
 
-### Docker Container
+### Container image
 
-Create `Dockerfile`:
-
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install the reverse proxy
-COPY . .
-RUN pip install --no-cache-dir .
-
-# Set environment variables
-ENV REVERSE_PROXY_GATEWAY=""
-ENV REVERSE_PROXY_TOKEN=""
-ENV LOG_FORMAT=json
-
-# Run the proxy
-ENTRYPOINT ["mcp-reverse-proxy"]
-CMD ["--local-stdio", "uvx mcp-server-git"]
-```
-
-Build and run:
+Pre-built multi-arch images (UBI 10, non-root, cosign-signed) are published to GitHub Container Registry:
 
 ```bash
-docker build -t mcp-reverse-proxy .
+docker pull ghcr.io/contextforge-org/mcp-reverse-proxy:latest
+
 docker run -d \
   --name mcp-proxy \
   -e REVERSE_PROXY_GATEWAY="wss://gateway.example.com/reverse-proxy" \
   -e REVERSE_PROXY_TOKEN="your-token" \
-  mcp-reverse-proxy
+  ghcr.io/contextforge-org/mcp-reverse-proxy:latest \
+  --local-stdio "uvx mcp-server-git"   # explicit transport - the inert default command only prints usage
+```
+
+The image's default command is inert (prints usage via `--help`); bridge a server by appending the full arguments, e.g. `--local-stdio "uvx mcp-server-git"` (the matching `REVERSE_PROXY_*` env vars or flags are required — without them the client exits with a config error). `uv`/`uvx` and `git` are included in the image for stdio MCP servers. Configuration works exactly as described above — CLI arguments, environment variables, or a mounted config file. Note: MCP server packages downloaded at run time (e.g. via `uvx`) are not covered by the image's signature or vulnerability scan — pin versions for production use.
+
+To build locally instead, use the root `Containerfile` (UBI 10 builder + minimal runtime):
+
+```bash
+docker build -f Containerfile -t mcp-reverse-proxy .
 ```
 
 ## Troubleshooting

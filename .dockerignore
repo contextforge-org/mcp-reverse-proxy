@@ -1,0 +1,11 @@
+# Deny-all build context: the Containerfile COPYs exactly these paths.
+*
+!pyproject.toml
+!USER_README.md
+!LICENSE
+!src/
+!src/**
+**/*.egg-info/**
+**/__pycache__/**
+**/*.pyc
+!requirements-container.txt

@@ -1,0 +1,6 @@
+# Seed inputs for requirements-container.txt that pyproject.toml does not
+# provide: the PEP 517 build backend, pinned so the project wheel can build
+# with `pip wheel --no-build-isolation` inside the Containerfile's builder
+# stage. Keep these floors in sync with [build-system] requires.
+setuptools>=78.1.1
+wheel>=0.46.2

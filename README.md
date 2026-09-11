@@ -36,6 +36,36 @@ mcp-reverse-proxy \
 
 Configuration can also come from environment variables (`REVERSE_PROXY_GATEWAY`, `REVERSE_PROXY_TOKEN`) or a JSON/YAML config file passed with `--config`.
 
+## Container image
+
+A multi-arch (`linux/amd64`, `linux/arm64`) UBI 10-based image is built from the root `Containerfile` and published to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/contextforge-org/mcp-reverse-proxy:latest
+
+docker run --rm \
+  -e REVERSE_PROXY_GATEWAY="wss://gateway.example.com/reverse-proxy" \
+  -e REVERSE_PROXY_TOKEN="$GATEWAY_TOKEN" \
+  ghcr.io/contextforge-org/mcp-reverse-proxy:latest \
+  --local-stdio "uvx mcp-server-git"   # explicit transport - the inert default command only prints usage
+```
+
+| Tag | Published when |
+| --- | --- |
+| `latest` | every push to `main` |
+| `X.Y.Z` | a `v*` release tag is pushed (immutable full-version tag; no `v` prefix, no moving aliases) |
+| `sha-<commit>` | every push to `main` |
+
+(Prerelease tags such as `v1.2.3-rc.1` publish only the full version tag, e.g. `1.2.3-rc.1` — no `X.Y`/`X` aliases.)
+
+The image runs as non-root (UID 1001) and includes `uv`/`uvx` and `git`, so stdio MCP servers such as `uvx mcp-server-git` work out of the box. Its default command is inert (prints usage via `--help`); bridge a server by passing the full arguments, e.g. appending `--local-stdio "uvx mcp-server-git"`. Note that MCP server packages downloaded at run time (e.g. via `uvx`) are not covered by the image's signature or vulnerability scan — pin them (for example `uvx mcp-server-git==<version>`) for production use. Images are keyless-signed with cosign:
+
+```bash
+cosign verify ghcr.io/contextforge-org/mcp-reverse-proxy:latest \
+  --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp='^https://github\.com/contextforge-org/mcp-reverse-proxy/\.github/workflows/container\.yml@refs/(heads/main|tags/v.*)$'
+```
+
 ## Features
 
 - **Multi-transport MCP server connections**: stdio (subprocess), Streamable HTTP (HTTP/2), and SSE
