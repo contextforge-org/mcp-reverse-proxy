@@ -14,9 +14,6 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}   # contextforge-org/mcp-reverse-proxy (already lowercase)
-  # Trivy runs containerized (same pinned image locally and in CI); resolve
-  # the digest per the todo-3 instructions and record the version here.
-  TRIVY_IMAGE: aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 # aquasec/trivy 0.74.0
 
 jobs:
   build-smoke:
@@ -85,8 +82,8 @@ jobs:
           fi
           grep -qi "usage" smoke.log
 
-  publish:
-    name: Scan-gated publish to ghcr.io
+  publish-build:
+    name: "Publish: build + sign"
     # Publish only from main or v* release tags - never PRs. workflow_dispatch
     # from main publishes exactly like a push to main (tags compute normally);
     # a dispatch from any other ref fails this job-level condition, so no
@@ -95,14 +92,16 @@ jobs:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: build-smoke
     runs-on: ubuntu-latest
-    concurrency:
-      group: container-publish
-      cancel-in-progress: false   # serialize ALL promotions globally; an active run is never cancelled (moving aliases are gone, so cross-tag alias regression is impossible by construction)
-      queue: max                  # queue pending promotions FIFO instead of evicting older ones (GHA ceiling: 100 pending per group; beyond that GitHub cancels new arrivals - accepted). Requires cancel-in-progress: false
     permissions:
       contents: read
       packages: write      # push to ghcr.io; also covers BuildKit's registry-native SBOM/provenance attestations (no GitHub attestations API used, so no attestations permission)
       id-token: write      # keyless cosign (GitHub OIDC)
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      resume: ${{ steps.immutable-check.outputs.resume }}
+      resume_tag: ${{ steps.immutable-check.outputs.resume_tag }}
+      resume_ref: ${{ steps.immutable-check.outputs.resume_ref }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -122,6 +121,14 @@ jobs:
           # Pin the emulator image too - setup-qemu otherwise runs the MUTABLE
           # privileged tonistiigi/binfmt:latest (resolve per todo-3 instructions).
           image: tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+        # QEMU is needed ONLY for the multi-arch BUILD below: the arm64 RUN
+        # steps (microdnf, pip) execute under emulation on this amd64 runner.
+        # Runtime smoke tests do NOT use emulation - see publish-smoke (native
+        # per-arch runners), which replaced the old single-runner QEMU smoke
+        # after "docker: cannot overwrite digest" (two `docker run --platform`
+        # calls against the same index-digest ref collide in the runner's
+        # classic image store; the second platform can never replace the
+        # digest ref the first platform claimed).
       - name: Install + verify buildx (pre-verified before ANY execution)
         env:
           BUILDX_VERSION: v0.36.1             # exact release authorized by the todo-3 Sigstore bundle verification
@@ -212,6 +219,8 @@ jobs:
             if [ "$resume_ok" -eq 1 ]; then
               echo "resume=true" >> "$GITHUB_OUTPUT"
               echo "resume_tag=$tag" >> "$GITHUB_OUTPUT"
+              rdigest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')
+              echo "resume_ref=${tag%:*}@$rdigest" >> "$GITHUB_OUTPUT"   # consumed by publish-smoke (no rebuild on retry)
               echo "RESUME: $tag already exists with this commit's revision on all platforms - verify-only path (see the resume step)"
             else
               echo "FAIL: release tag $tag already published for a DIFFERENT commit - refusing to overwrite (immutability)" >&2
@@ -244,67 +253,9 @@ jobs:
           cache-from: type=gha,scope=container
           cache-to: type=gha,mode=max,scope=container
         # Accepted boundary (recorded in Scope - Must NOT have): push-by-digest
-        # makes the image registry-addressable before the scan; this is a TAG
+        # makes the image registry-addressable before the gates; this is a TAG
         # gate, not a publish gate. A failed gate leaves only an untagged
         # digest (cleanup: rollout note in todo 5).
-      - name: Trivy gate - fixable CRITICAL (both platforms; failures aggregated, not short-circuited)
-        if: steps.immutable-check.outputs.resume != 'true'
-        env:
-          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/trivy-cache"   # one job-scoped Trivy DB: 4 scans share 1 download
-          # Honor the enforced-expiry ignore file when it exists (Trivy's default
-          # .trivyignore filename would NOT pick up .trivyignore.yaml):
-          EXTRA=()   # argument ARRAY (shellcheck-clean, zsh-safe): an unquoted $IGNORE_ARG string breaks under zsh and trips SC2086 in the mandatory actionlint QA
-          [ -f .trivyignore.yaml ] && EXTRA=(--ignorefile .trivyignore.yaml)
-          if [ -f .trivyignore.yaml ]; then
-            python3 - <<'PY'
-          import sys, yaml
-          doc = yaml.safe_load(open('.trivyignore.yaml'))
-          entries = (doc or {}).get('vulnerabilities') or []
-          assert entries, '.trivyignore.yaml: no vulnerabilities entries'
-          for i, e in enumerate(entries):
-              for key in ('id', 'statement', 'expired_at'):
-                  assert e.get(key), f'.trivyignore.yaml entry {i}: missing/empty {key}'
-              assert e.get('purls') or e.get('paths'), f'.trivyignore.yaml entry {i}: must scope to purls or paths'
-          print(f'.trivyignore.yaml: {len(entries)} scoped, expiring entries validated')
-          PY
-          fi   # machine-validated: an unscoped/unexpiring exception FAILS the gate instead of silently weakening it (python3 + PyYAML are preinstalled on ubuntu-latest)
-          failed=0
-          for platform in linux/amd64 linux/arm64; do
-            echo "::group::Trivy gate (fixable CRITICAL) $platform"
-            docker run --rm \
-              -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" \
-              -v "$RUNNER_TEMP/trivy-cache:/root/.cache" \
-              -v "$PWD:/repo" -w /repo \
-              "$TRIVY_IMAGE" image --platform "$platform" --severity CRITICAL --ignore-unfixed \
-              --exit-code 1 --scanners vuln "${EXTRA[@]}" "$DIGEST_REF" || failed=1
-            echo "::endgroup::"
-          done
-          if [ "$failed" -ne 0 ]; then
-            echo "Fixable CRITICAL vulnerabilities found - see grouped scans above" >&2
-            exit 1
-          fi
-      - name: Trivy report - ALL CRITICAL incl. unfixed (informational; runs even when the gate fails)
-        if: always() && steps.build.outcome == 'success'
-        env:
-          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-        run: |
-          for platform in linux/amd64 linux/arm64; do
-            echo "::group::Trivy report (ALL CRITICAL) $platform"
-            docker run --rm \
-              -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" \
-              -v "$RUNNER_TEMP/trivy-cache:/root/.cache" \
-              "$TRIVY_IMAGE" image --platform "$platform" --severity CRITICAL \
-              --ignorefile /dev/null --exit-code 0 --scanners vuln "$DIGEST_REF"
-            echo "::endgroup::"
-          done
-        # Policy: the GATE ignores only findings with no available fix and honors a
-        # root `.trivyignore.yaml` (mounted /repo) whose entries carry id + purls (or paths) -
-        # statement, and expired_at, and are SCOPED to exact purls/paths (an unscoped id
-        # resurfaces and FAILS the gate, forcing re-triage). The REPORT bypasses
-        # ignores (--ignorefile /dev/null) so EVERY CRITICAL stays visible. Create
-        # the file ONLY for a genuine false positive; if created, commit it with this workflow (Scope Must have).
       - name: Install cosign
         if: steps.immutable-check.outputs.resume != 'true'
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -331,33 +282,120 @@ jobs:
           printf '%s\n' "$sbom" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SPDX")) and (."linux/arm64" | has("SPDX"))'
           prov=$(docker buildx imagetools inspect "$DIGEST_REF" --format '{{json .Provenance}}')
           printf '%s\n' "$prov" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SLSA")) and (."linux/arm64" | has("SLSA"))'
-      - name: Pre-tag smoke on the exact signed digest (both platforms, via QEMU)
-        if: steps.immutable-check.outputs.resume != 'true'
+
+  publish-smoke:
+    name: "Publish: pre-tag smoke (${{ matrix.platform }})"
+    # Native per-arch runners, NOT one runner + QEMU: `docker run --platform
+    # A ref@digest` followed by `docker run --platform B ref@digest` on one
+    # host fails with "docker: cannot overwrite digest" - the classic image
+    # store binds the digest ref to the first platform pulled and refuses to
+    # re-associate it. One platform per runner sidesteps the image store
+    # entirely; each leg pulls exactly its own platform manifest. The PR
+    # build-smoke job stays amd64-only; this gate covers BOTH arches on the
+    # exact signed digest before any tag exists, so a broken arm64
+    # venv/shebang/console script can never be signed and tagged clean.
+    needs: publish-build
+    strategy:
+      fail-fast: false   # report both arches even when one fails
+      matrix:
+        include:
+          # Pin explicit runner labels (not ubuntu-latest): the correctness of
+          # each leg depends on the runner's ARCHITECTURE matching its matrix
+          # platform - `docker run` without --platform pulls the runner's
+          # native platform from the index.
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm   # native arm64 hosted runners (public repos)
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: read      # pull the untagged digest from ghcr.io
+    steps:
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve the digest to smoke (fresh build, or the existing tag on resume)
+        id: ref
         env:
-          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          RESUME: ${{ needs.publish-build.outputs.resume }}
+          RESUME_REF: ${{ needs.publish-build.outputs.resume_ref }}
+          BUILD_DIGEST: ${{ needs.publish-build.outputs.digest }}
         run: |
           set -euo pipefail
-          for platform in linux/amd64 linux/arm64; do
-            echo "::group::Pre-tag smoke $platform"
-            f="smoke-$(echo "$platform" | tr '/' '-').txt"   # linux/amd64 contains a slash - a literal smoke-$platform.txt path would not exist
-            docker run --rm --platform "$platform" "$DIGEST_REF" --help > "$f"
-            grep 'Bridge MCP servers' "$f" >/dev/null
-            docker run --rm --platform "$platform" --entrypoint uvx "$DIGEST_REF" --version
-            docker run --rm --platform "$platform" --entrypoint git "$DIGEST_REF" --version
-            docker run --rm --platform "$platform" --entrypoint id "$DIGEST_REF" > "id-$(echo "$platform" | tr '/' '-').txt"
-            grep 'uid=1001' "id-$(echo "$platform" | tr '/' '-').txt" >/dev/null
-            docker run --rm --platform "$platform" --entrypoint sh "$DIGEST_REF" -c 'touch "$HOME/.w" && touch "$UV_CACHE_DIR/.w" && rm -f "$HOME/.w" "$UV_CACHE_DIR/.w"'
-            docker run --rm --platform "$platform" --entrypoint sh "$DIGEST_REF" -c 'test "$VIRTUAL_ENV" = /opt/venv && test "$(command -v python)" = /opt/venv/bin/python'
-            echo "::endgroup::"
-          done
-        # The PR build-smoke job is amd64-only; this runs the SIGNED digest on
-        # BOTH arches before any tag exists, so a broken arm64 venv/shebang/
-        # console script can never be scanned, signed, and tagged clean.
-      - name: Apply tags (only after the scan gate passes AND the signature verifies)
-        if: steps.immutable-check.outputs.resume != 'true'
+          if [ "$RESUME" = "true" ]; then
+            echo "ref=$RESUME_REF" >> "$GITHUB_OUTPUT"
+            echo "Smoke target: EXISTING $RESUME_REF (resume path - verify only, never rebuild)"
+          else
+            echo "ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@$BUILD_DIGEST" >> "$GITHUB_OUTPUT"
+            echo "Smoke target: fresh digest ${BUILD_DIGEST}"
+          fi
+      - name: Pre-tag smoke on the exact signed digest (native ${{ matrix.platform }})
         env:
-          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST_REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm "$DIGEST_REF" --help > smoke-help.txt
+          grep 'Bridge MCP servers' smoke-help.txt >/dev/null
+          docker run --rm --entrypoint uvx "$DIGEST_REF" --version
+          docker run --rm --entrypoint git "$DIGEST_REF" --version
+          docker run --rm --entrypoint id "$DIGEST_REF" > smoke-id.txt
+          grep 'uid=1001' smoke-id.txt >/dev/null
+          docker run --rm --entrypoint sh "$DIGEST_REF" -c 'touch "$HOME/.w" && touch "$UV_CACHE_DIR/.w" && rm -f "$HOME/.w" "$UV_CACHE_DIR/.w"'
+          docker run --rm --entrypoint sh "$DIGEST_REF" -c 'test "$VIRTUAL_ENV" = /opt/venv && test "$(command -v python)" = /opt/venv/bin/python'
+
+  publish:
+    name: Publish to ghcr.io (apply tags)
+    # Publish only from main or v* release tags. Runs after publish-build
+    # (build + sign + verify) AND publish-smoke (native smoke on both arches)
+    # succeed: every tag below lands only on a digest that was signed,
+    # verified, attested, and smoke-tested.
+    needs: [publish-build, publish-smoke]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: container-publish
+      cancel-in-progress: false   # serialize ALL promotions globally; an active run is never cancelled (moving aliases are gone, so cross-tag alias regression is impossible by construction)
+      queue: max                  # queue pending promotions FIFO instead of evicting older ones (GHA ceiling: 100 pending per group; beyond that GitHub cancels new arrivals - accepted). Requires cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write      # tag the already-pushed digest (imagetools create)
+    steps:
+      - name: Install + verify buildx (pre-verified before ANY execution)
+        env:
+          BUILDX_VERSION: v0.36.1             # exact release authorized by the todo-3 Sigstore bundle verification
+          BUILDX_SHA256: 48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778      # record only after exact-asset bundle verification succeeds
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.docker/cli-plugins"
+          tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+          curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" -o "$tmp"
+          echo "$BUILDX_SHA256  $tmp" | shasum -a 256 -c -
+          install -m 0755 "$tmp" "$HOME/.docker/cli-plugins/docker-buildx"
+          docker buildx version
+        # This job never checks out the repo (nothing here reads workspace
+        # files) and never builds: buildx is required ONLY for the registry-
+        # side `imagetools` create/inspect below. No builder setup needed -
+        # imagetools does not use a BuildKit daemon.
+      - name: Assert buildx binary unchanged post-install
+        env:
+          BUILDX_SHA256: 48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778
+        run: |
+          set -euo pipefail
+          echo "$BUILDX_SHA256  $HOME/.docker/cli-plugins/docker-buildx" | shasum -a 256 -c -
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply tags (only after the signature verifies AND both smoke legs pass)
+        if: needs.publish-build.outputs.resume != 'true'
+        env:
+          DIGEST_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.publish-build.outputs.digest }}
+          TAGS: ${{ needs.publish-build.outputs.tags }}
           REF: ${{ github.ref }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # for the stale-main gh api guard below
         run: |
@@ -381,7 +419,7 @@ jobs:
               *:latest) ;;  # latest moves forward on main by design (stale-main guard above)
               *)
                 if out=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>&1); then
-                  if [ "$out" != "${{ steps.build.outputs.digest }}" ]; then
+                  if [ "$out" != "${{ needs.publish-build.outputs.digest }}" ]; then
                     echo "FAIL: immutable tag $tag already exists at a DIFFERENT digest ($out)" >&2
                     exit 1
                   fi
@@ -414,7 +452,7 @@ jobs:
                 ;;
             esac
             if out=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>&1); then
-              if [ "$out" = "${{ steps.build.outputs.digest }}" ]; then
+              if [ "$out" = "${{ needs.publish-build.outputs.digest }}" ]; then
                 echo "$tag already points at this digest - leaving as is"
               else
                 case "$tag" in
@@ -422,7 +460,7 @@ jobs:
                     echo "$tag exists at a different digest - moving it forward to the signed digest (rolling alias; the stale-main guard already ran)"
                     docker buildx imagetools create -t "$tag" "$DIGEST_REF"
                     created=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')
-                    test "$created" = "${{ steps.build.outputs.digest }}" || { echo "FAIL: $tag does not point at the signed digest immediately after create" >&2; exit 1; }
+                    test "$created" = "${{ needs.publish-build.outputs.digest }}" || { echo "FAIL: $tag does not point at the signed digest immediately after create" >&2; exit 1; }
                     ;;
                   *)
                     echo "FAIL: immutable tag $tag moved to a DIFFERENT digest ($out) between preflight and create" >&2
@@ -434,7 +472,7 @@ jobs:
               echo "Tagging $DIGEST_REF as $tag"
               docker buildx imagetools create -t "$tag" "$DIGEST_REF"
               created=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')
-              test "$created" = "${{ steps.build.outputs.digest }}" || { echo "FAIL: $tag does not point at the signed digest immediately after create" >&2; exit 1; }   # verify EVERY resulting tag right after creating it
+              test "$created" = "${{ needs.publish-build.outputs.digest }}" || { echo "FAIL: $tag does not point at the signed digest immediately after create" >&2; exit 1; }   # verify EVERY resulting tag right after creating it
             else
               echo "FAIL: could not inspect $tag before create (fail-closed): $out" >&2
               exit 1
@@ -447,17 +485,16 @@ jobs:
           # Machine-readable labels for post-publish verification (grep these
           # from `gh run view --log`; the primary tag is `latest` on main and
           # the full semver tag on v* releases):
-          echo "PUBLISH_DIGEST=${{ steps.build.outputs.digest }}"
+          echo "PUBLISH_DIGEST=${{ needs.publish-build.outputs.digest }}"
           echo "PUBLISHED_PRIMARY_TAG=$primary"
       - name: Install cosign (resume path)
-        if: steps.immutable-check.outputs.resume == 'true'
+        if: needs.publish-build.outputs.resume == 'true'
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Resume verification of the existing immutable tag (retry path - verify only, never rebuild or overwrite)
-        if: steps.immutable-check.outputs.resume == 'true'
+        if: needs.publish-build.outputs.resume == 'true'
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
           REF: ${{ github.ref }}
-          RESUME_TAG: ${{ steps.immutable-check.outputs.resume_tag }}
+          RESUME_TAG: ${{ needs.publish-build.outputs.resume_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -472,32 +509,6 @@ jobs:
           printf '%s\n' "$sbom" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SPDX")) and (."linux/arm64" | has("SPDX"))'
           prov=$(docker buildx imagetools inspect "$ref" --format '{{json .Provenance}}')
           printf '%s\n' "$prov" | jq -e 'has("linux/amd64") and has("linux/arm64") and (."linux/amd64" | has("SLSA")) and (."linux/arm64" | has("SLSA"))'
-          for platform in linux/amd64 linux/arm64; do
-            f="resume-smoke-$(echo "$platform" | tr '/' '-').txt"
-            docker run --rm --platform "$platform" "$ref" --help > "$f"
-            grep 'Bridge MCP servers' "$f" >/dev/null
-          done
-          mkdir -p "$RUNNER_TEMP/trivy-cache"
-          EXTRA=()   # mirror the fresh-publish gate's scoped ignore handling
-          [ -f .trivyignore.yaml ] && EXTRA=(--ignorefile .trivyignore.yaml)
-          if [ -f .trivyignore.yaml ]; then
-            python3 - <<'PY'
-          import sys, yaml
-          doc = yaml.safe_load(open('.trivyignore.yaml'))
-          entries = (doc or {}).get('vulnerabilities') or []
-          assert entries, '.trivyignore.yaml: no vulnerabilities entries'
-          for i, e in enumerate(entries):
-              for key in ('id', 'statement', 'expired_at'):
-                  assert e.get(key), f'.trivyignore.yaml entry {i}: missing/empty {key}'
-              assert e.get('purls') or e.get('paths'), f'.trivyignore.yaml entry {i}: must scope to purls or paths'
-          print(f'.trivyignore.yaml: {len(entries)} scoped, expiring entries validated')
-          PY
-          fi   # same machine validation as the fresh gate
-          failed=0
-          for platform in linux/amd64 linux/arm64; do
-            docker run --rm -v "$HOME/.docker/config.json:/root/.docker/config.json:ro" -v "$RUNNER_TEMP/trivy-cache:/root/.cache" -v "$PWD:/repo" -w /repo "$TRIVY_IMAGE" image --platform "$platform" --severity CRITICAL --ignore-unfixed --exit-code 1 --scanners vuln "${EXTRA[@]}" "$ref" || failed=1
-          done
-          [ "$failed" -eq 0 ]
           if [ "$REF" = "refs/heads/main" ]; then
             current=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)
             if [ "$current" = "$GITHUB_SHA" ]; then
@@ -515,3 +526,5 @@ jobs:
           else
             echo "PUBLISHED_PRIMARY_TAG=$tag"
           fi
+        # Runtime smoke on resume is covered by publish-smoke (it runs against
+        # resume_ref, the existing tag's digest, on both native arches).
