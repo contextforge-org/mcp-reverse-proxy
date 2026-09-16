@@ -14,6 +14,7 @@ from __future__ import annotations
 
 # Standard
 import asyncio
+import json
 import ssl
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -25,6 +26,7 @@ import httpx
 from mcp_reverse_proxy.base import McpServerTransport
 from mcp_reverse_proxy.cert_utils import load_cert_data
 from mcp_reverse_proxy.logging_config import LoggingService
+from mcp_reverse_proxy.transports.sse_events import parse_sse_events
 
 
 class SessionExpiredError(Exception):
@@ -187,9 +189,6 @@ class StreamableHttpAdapter(McpServerTransport):
             LOGGER.debug(f"Including session headers: session_id={self._session_id}, protocol={self._protocol_version}")
         else:
             # No session - check if this is an initialize request
-            # Standard
-            import json
-
             try:
                 msg_data = json.loads(message)
                 is_initialize = msg_data.get("method") == "initialize"
@@ -226,39 +225,31 @@ class StreamableHttpAdapter(McpServerTransport):
                 LOGGER.info(f"← HTTP response received: {response_text[:200]}... (total length: {len(response_text)})")
                 LOGGER.info(f"Number of message handlers: {len(self._message_handlers)}")
 
-                # Parse SSE format if present (streamable HTTP may return SSE-formatted responses)
-                # SSE format: "event: message\ndata: {json}\n\n"
-                json_message = response_text
-                if response_text.startswith(("event:", "data:")):
-                    # Extract JSON from SSE format
-                    lines = response_text.strip().split("\n")
-                    for line in lines:
-                        if line.startswith("data:"):
-                            json_message = line[5:].strip()  # Remove "data:" prefix
-                            LOGGER.info(f"Extracted JSON from SSE format: {json_message[:200]}...")
-                            break
+                # Parse SSE format if present (streamable HTTP may return
+                # SSE-formatted responses): every dispatched event is relayed
+                # in order. Falls back to the raw body for plain JSON
+                # responses (no SSE payloads extracted).
+                json_messages = [event.data for event in parse_sse_events(response_text)] or [response_text]
 
-                # Extract protocol version from initialize response
-                if not self._protocol_version:
-                    try:
-                        # Standard
-                        import json
+                for json_message in json_messages:
+                    # Extract protocol version from initialize response
+                    if not self._protocol_version:
+                        try:
+                            msg_data = json.loads(json_message)
+                            if msg_data.get("result", {}).get("protocolVersion"):
+                                self._protocol_version = msg_data["result"]["protocolVersion"]
+                                LOGGER.info(f"Negotiated protocol version: {self._protocol_version}")
+                        except Exception:
+                            pass  # Not an initialize response or parsing failed
 
-                        msg_data = json.loads(json_message)
-                        if msg_data.get("result", {}).get("protocolVersion"):
-                            self._protocol_version = msg_data["result"]["protocolVersion"]
-                            LOGGER.info(f"Negotiated protocol version: {self._protocol_version}")
-                    except Exception:
-                        pass  # Not an initialize response or parsing failed
-
-                # Notify all message handlers of the response
-                for idx, handler in enumerate(self._message_handlers):
-                    try:
-                        LOGGER.info(f"Calling handler {idx + 1}/{len(self._message_handlers)}")
-                        await handler(json_message)
-                        LOGGER.info(f"Handler {idx + 1} completed successfully")
-                    except Exception as handler_error:
-                        LOGGER.error(f"Handler {idx + 1} failed: {handler_error}", exc_info=True)
+                    # Notify all message handlers of the response
+                    for idx, handler in enumerate(self._message_handlers):
+                        try:
+                            LOGGER.info(f"Calling handler {idx + 1}/{len(self._message_handlers)}")
+                            await handler(json_message)
+                            LOGGER.info(f"Handler {idx + 1} completed successfully")
+                        except Exception as handler_error:
+                            LOGGER.error(f"Handler {idx + 1} failed: {handler_error}", exc_info=True)
             else:
                 LOGGER.warning("HTTP response has no content - this may indicate a problem with the MCP server")
 
@@ -266,9 +257,6 @@ class StreamableHttpAdapter(McpServerTransport):
             # If we get a 404, the session is invalid (server restarted or session expired)
             # Only retry if this is an initialize request - other requests need gateway to re-initialize
             if e.response.status_code == 404 and (self._session_id or self._protocol_version):
-                # Standard
-                import json
-
                 try:
                     msg_data = json.loads(message)
                     is_initialize = msg_data.get("method") == "initialize"
@@ -310,32 +298,27 @@ class StreamableHttpAdapter(McpServerTransport):
                             response_text = response.text
                             LOGGER.info(f"← HTTP response received: {response_text[:200]}...")
 
-                            # Parse SSE format if present
-                            json_message = response_text
-                            if response_text.startswith(("event:", "data:")):
-                                lines = response_text.strip().split("\n")
-                                for line in lines:
-                                    if line.startswith("data:"):
-                                        json_message = line[5:].strip()
-                                        break
+                            # Parse SSE format if present (same handling as
+                            # the primary path: relay every dispatched event)
+                            json_messages = [event.data for event in parse_sse_events(response_text)] or [response_text]
 
-                            # Extract protocol version from initialize response
-                            if not self._protocol_version:
-                                try:
-                                    msg_data = json.loads(json_message)
-                                    if msg_data.get("result", {}).get("protocolVersion"):
-                                        self._protocol_version = msg_data["result"]["protocolVersion"]
-                                        LOGGER.info(f"Negotiated protocol version: {self._protocol_version}")
-                                except Exception:
-                                    pass
+                            for json_message in json_messages:
+                                # Extract protocol version from initialize response
+                                if not self._protocol_version:
+                                    try:
+                                        msg_data = json.loads(json_message)
+                                        if msg_data.get("result", {}).get("protocolVersion"):
+                                            self._protocol_version = msg_data["result"]["protocolVersion"]
+                                            LOGGER.info(f"Negotiated protocol version: {self._protocol_version}")
+                                    except Exception:
+                                        pass
 
-                            # Notify handlers
-                            for handler in self._message_handlers:
-                                try:
-                                    await handler(json_message)
-                                except Exception as handler_error:
-                                    LOGGER.error(f"Handler failed: {handler_error}", exc_info=True)
-
+                                # Notify handlers
+                                for handler in self._message_handlers:
+                                    try:
+                                        await handler(json_message)
+                                    except Exception as handler_error:
+                                        LOGGER.error(f"Handler failed: {handler_error}", exc_info=True)
                         return  # Success, exit the method
 
                     except Exception as retry_error:

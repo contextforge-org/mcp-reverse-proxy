@@ -12,7 +12,7 @@ from __future__ import annotations
 # Standard
 import asyncio
 import ssl
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 # Third-Party
 import httpx
@@ -174,6 +174,114 @@ async def test_send_with_existing_session_adds_session_headers_and_parses_sse_re
     assert headers["mcp-session-id"] == "session-1"
     assert headers["mcp-protocol-version"] == "2025-11-05"
 
+
+@pytest.mark.asyncio
+async def test_send_relays_json_after_empty_sse_keepalive_preamble() -> None:
+    """SSE preamble frames must not shadow the JSON event that follows.
+
+    Regression: servers open the stream with ``data:`` (empty payload), ``id:``
+    and ``retry:`` control frames before the JSON event. The old parser took
+    the FIRST ``data:`` line - an empty string - so handlers received "" and
+    downstream JSON parsing failed with "Input is a zero-length, empty
+    document" and the initialize response was never relayed.
+    """
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    handler = AsyncMock()
+    adapter.add_message_handler(handler)
+
+    initialize_result = '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-05"}}'
+    response = Mock()
+    response.headers = {"mcp-session-id": "session-1"}
+    response.status_code = 200
+    response.content = b"data:\nid: 0\nretry: 3000\n\ndata: " + initialize_result.encode() + b"\n\n"
+    response.text = f"data:\nid: 0\nretry: 3000\n\ndata: {initialize_result}\n\n"
+    response.raise_for_status = Mock()
+    adapter._client.post = AsyncMock(return_value=response)
+
+    await adapter.send('{"jsonrpc":"2.0","id":1,"method":"initialize"}')
+
+    handler.assert_awaited_once_with(initialize_result)
+    assert adapter._protocol_version == "2025-11-05"
+
+
+@pytest.mark.asyncio
+async def test_send_relays_every_sse_event_in_multi_event_response() -> None:
+    """Each dispatched SSE event must be relayed, not just the first data frame."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    adapter._session_id = "session-1"
+    adapter._protocol_version = "2025-11-05"
+    handler = AsyncMock()
+    adapter.add_message_handler(handler)
+
+    first = '{"jsonrpc":"2.0","id":2,"result":{"ok":true}}'
+    second = '{"jsonrpc":"2.0","id":3,"result":{"ok":false}}'
+    response = Mock()
+    response.headers = {}
+    response.status_code = 200
+    response.content = b"event: message\ndata: " + first.encode() + b"\n\ndata: " + second.encode() + b"\n\n"
+    response.text = f"event: message\ndata: {first}\n\ndata: {second}\n\n"
+    response.raise_for_status = Mock()
+    adapter._client.post = AsyncMock(return_value=response)
+
+    await adapter.send('{"jsonrpc":"2.0","id":2,"method":"tools/call"}')
+
+    assert handler.await_args_list == [call(first), call(second)]
+
+
+@pytest.mark.asyncio
+async def test_send_joins_multi_line_sse_data_frames() -> None:
+    """Multi-line ``data:`` frames must be joined with newlines per the SSE spec."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    adapter._session_id = "session-1"
+    adapter._protocol_version = "2025-11-05"
+    handler = AsyncMock()
+    adapter.add_message_handler(handler)
+
+    response = Mock()
+    response.headers = {}
+    response.status_code = 200
+    response.content = b'data: {"jsonrpc":"2.0","id":7,\ndata: "result":{"ok":true}}\n\n'
+    response.text = 'data: {"jsonrpc":"2.0","id":7,\ndata: "result":{"ok":true}}\n\n'
+    response.raise_for_status = Mock()
+    adapter._client.post = AsyncMock(return_value=response)
+
+    await adapter.send('{"jsonrpc":"2.0","id":7,"method":"tools/call"}')
+
+    handler.assert_awaited_once_with('{"jsonrpc":"2.0","id":7,\n"result":{"ok":true}}')
+
+
+@pytest.mark.asyncio
+async def test_send_retries_initialize_after_404_and_parses_sse_preamble() -> None:
+    """The 404-retry path must parse SSE bodies the same way as the primary path."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    adapter._session_id = "stale-session"
+    adapter._protocol_version = "2025-11-05"
+    handler = AsyncMock()
+    adapter.add_message_handler(handler)
+
+    ok_body = Mock()
+    ok_body.headers = {"mcp-session-id": "session-2"}
+    ok_body.status_code = 200
+    ok_body.content = b"data:\nid: 0\nretry: 3000\n\ndata: " + b'{"jsonrpc":"2.0","result":{"protocolVersion":"2025-11-05"}}' + b"\n\n"
+    ok_body.text = 'data:\nid: 0\nretry: 3000\n\ndata: {"jsonrpc":"2.0","result":{"protocolVersion":"2025-11-05"}}\n\n'
+    ok_body.raise_for_status = Mock()
+
+    not_found = Mock()
+    not_found.response = httpx.Response(404, request=httpx.Request("POST", "http://server.example/mcp"))
+    adapter._client.post = AsyncMock(side_effect=[httpx.HTTPStatusError("404", request=not_found.response, response=not_found.response), ok_body])
+
+    await adapter.send('{"jsonrpc":"2.0","id":1,"method":"initialize"}')
+
+    handler.assert_awaited_once_with('{"jsonrpc":"2.0","result":{"protocolVersion":"2025-11-05"}}')
+    assert adapter._session_id == "session-2"
 
 @pytest.mark.asyncio
 async def test_send_raises_for_non_initialize_request_without_session() -> None:

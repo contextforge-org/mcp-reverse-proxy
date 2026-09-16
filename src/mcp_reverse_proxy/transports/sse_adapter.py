@@ -26,6 +26,7 @@ import orjson
 from mcp_reverse_proxy.base import McpServerTransport
 from mcp_reverse_proxy.cert_utils import load_cert_data
 from mcp_reverse_proxy.logging_config import LoggingService
+from mcp_reverse_proxy.transports.sse_events import SSEParser
 
 # Initialize logging
 logging_service = LoggingService()
@@ -304,9 +305,10 @@ class SseAdapter(McpServerTransport):
                 response.raise_for_status()
                 LOGGER.info(f"SSE stream connected: status={response.status_code}")
 
-                # Process SSE events
-                event_type = None
-                data_lines = []
+                # Process SSE events (shared parser; typed events only are
+                # dispatched - untyped data frames carry no message type to
+                # route on, and the parser skips empty keepalive frames)
+                parser = SSEParser()
 
                 async for line in response.aiter_lines():
                     # Check for shutdown
@@ -314,26 +316,9 @@ class SseAdapter(McpServerTransport):
                         LOGGER.info("Shutdown requested, closing SSE stream")
                         break
 
-                    stripped_line = line.strip()
-
-                    if not stripped_line:
-                        # Empty line marks end of event
-                        if event_type and data_lines:
-                            await self._process_sse_event(event_type, "\n".join(data_lines))
-                            event_type = None
-                            data_lines = []
-                        continue
-
-                    if stripped_line.startswith("event:"):
-                        event_type = stripped_line[6:].strip()
-                    elif stripped_line.startswith("data:"):
-                        data_lines.append(stripped_line[5:].strip())
-                    elif line.startswith("retry:"):
-                        # Retry timeout - informational only
-                        pass
-                    elif line.startswith(":"):
-                        # Comment - ignore
-                        pass
+                    event = parser.feed_line(line)
+                    if event is not None and event.event is not None:
+                        await self._process_sse_event(event.event, event.data)
 
         except httpx.HTTPError as e:
             if self._connected:

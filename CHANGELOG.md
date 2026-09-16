@@ -11,3 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial import of the MCP Reverse Proxy from [IBM/mcp-context-forge](https://github.com/IBM/mcp-context-forge), extracted as part of the PR #5417 decomposition. Includes the standalone client package with multi-transport support (stdio, Streamable HTTP, SSE, WebSocket), two-layer health monitoring, TLS certificate handling, and the `mcp-reverse-proxy` console script.
 - Integration test suite (`tests/integration/`) exercising the stdio, SSE, and Streamable HTTP adapters end-to-end against a minimal FastMCP companion server, plus a full reverse-proxy round-trip test with a fake WebSocket gateway. Requires the new `integration` optional extra (`fastmcp`, `uvicorn`); runs as a non-blocking CI job. (issue #2)
+
+### Fixed
+
+- Streamable HTTP adapter dropped SSE responses after an empty keepalive preamble: the parser took the first `data:` line (an empty keepalive frame), handed handlers an empty string, and the initialize response was never relayed — gateway discovery then timed out with `register_complete: error`. Parsing now follows the SSE line protocol (multi-line `data:` frames joined, blank line dispatches, empty keepalive events skipped, every event relayed in order) via a new shared parser (`transports/sse_events.py`) also used by the SSE adapter; the 404 initialize-retry path is fixed the same way. (issue #9)
