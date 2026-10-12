@@ -14,11 +14,28 @@ from mcp_reverse_proxy.transports.sse_adapter import SseAdapter
 
 DEFAULT_TIMEOUT = 15.0
 
-INITIALIZE_PARAMS: dict[str, Any] = {
-    "protocolVersion": "2025-06-18",
-    "capabilities": {},
-    "clientInfo": {"name": "mcp-reverse-proxy-integration-tests", "version": "0.1.0"},
-}
+# Handshake-era protocol versions exercised against the companion server.
+# FastMCP 4 negotiates the era per connection, so every version a gateway
+# may legitimately offer must round-trip through the proxy unchanged.
+HANDSHAKE_PROTOCOL_VERSIONS = ("2025-06-18", "2025-11-25")
+
+# Modern (sessionless) era: no initialize handshake; capability discovery via
+# server/discover and the protocol version carried in each request's _meta.
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+MODERN_PROTOCOL_META_KEY = "io.modelcontextprotocol/protocolVersion"
+
+
+def initialize_params(protocol_version: str) -> dict[str, Any]:
+    """Build initialize params for a handshake-era protocol version."""
+    return {
+        "protocolVersion": protocol_version,
+        "capabilities": {},
+        "clientInfo": {"name": "mcp-reverse-proxy-integration-tests", "version": "0.1.0"},
+    }
+
+
+# Default initialize params, pinned to the newest handshake era.
+INITIALIZE_PARAMS: dict[str, Any] = initialize_params(HANDSHAKE_PROTOCOL_VERSIONS[-1])
 
 INITIALIZED_NOTIFICATION = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
