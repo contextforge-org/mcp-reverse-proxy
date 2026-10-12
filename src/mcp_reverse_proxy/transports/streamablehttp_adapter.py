@@ -14,6 +14,7 @@ from __future__ import annotations
 
 # Standard
 import asyncio
+import base64
 import json
 import ssl
 from collections.abc import Awaitable, Callable
@@ -37,12 +38,62 @@ class SessionExpiredError(Exception):
 logging_service = LoggingService()
 LOGGER = logging_service.get_logger("mcp_reverse_proxy.transports.streamablehttp_adapter")
 
+# Modern (sessionless, 2026-07-28) protocol markers
+MODERN_PROTOCOL_META_KEY = "io.modelcontextprotocol/protocolVersion"
+DISCOVER_METHOD = "server/discover"
+# Methods whose params carry a target name mirrored into the Mcp-Name header
+NAMED_METHOD_PARAMS = {"tools/call": "name", "resources/read": "uri", "prompts/get": "name"}
+BASE64_SENTINEL_PREFIX = "=?base64?"
+BASE64_SENTINEL_SUFFIX = "?="
+
+
+def extract_modern_protocol_version(msg_data: dict[str, object]) -> str | None:
+    """Return the protocol version declared in a message's ``_meta``, if any.
+
+    Modern-era (2026-07-28) clients carry the negotiated version in every
+    request's ``params._meta`` rather than negotiating it via an initialize
+    handshake. A top-level ``_meta`` is tolerated as a fallback.
+    """
+    params = msg_data.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    if not isinstance(meta, dict):
+        meta = msg_data.get("_meta")
+    if isinstance(meta, dict):
+        version = meta.get(MODERN_PROTOCOL_META_KEY)
+        if isinstance(version, str) and version:
+            return version
+    return None
+
+
+def encode_header_value(value: str) -> str:
+    """Encode an Mcp-Name header value per the 2026-07-28 value-encoding rules.
+
+    Header-safe values (visible ASCII, space, tab; no leading/trailing
+    whitespace; not matching the sentinel pattern) pass through verbatim;
+    anything else is Base64-encoded with the ``=?base64?...?=`` sentinel.
+    """
+    header_safe = (
+        value == value.strip(" \t")
+        and all(c in " \t" or 0x21 <= ord(c) <= 0x7E for c in value)
+        and not (value.startswith(BASE64_SENTINEL_PREFIX) and value.endswith(BASE64_SENTINEL_SUFFIX))
+    )
+    if header_safe:
+        return value
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    return f"{BASE64_SENTINEL_PREFIX}{encoded}{BASE64_SENTINEL_SUFFIX}"
+
 
 class StreamableHttpAdapter(McpServerTransport):
     """Transport adapter for Streamable HTTP MCP servers.
 
     Communicates with MCP servers via HTTP/2 streaming instead of stdio.
     The server can be local or remote - this adapter connects via HTTP.
+
+    Supports both MCP protocol eras on the HTTP leg: the session-based
+    handshake eras (initialize + mcp-session-id, through 2025-11-25) and
+    the sessionless 2026-07-28 era (server/discover, per-request
+    MCP-Protocol-Version header, no sessions). The era is detected from the
+    first messages forwarded and is fixed for the adapter's lifetime.
     """
 
     def __init__(
@@ -73,6 +124,9 @@ class StreamableHttpAdapter(McpServerTransport):
         # Session management (MCP protocol requirement)
         self._session_id: str | None = None
         self._protocol_version: str | None = None
+        # True once modern-era (2026-07-28) traffic is seen: no initialize
+        # handshake, no session headers; version/routing headers minted per request
+        self._sessionless = False
         # Authentication headers from gateway
         self._auth_headers: dict[str, str] = {}
 
@@ -153,23 +207,46 @@ class StreamableHttpAdapter(McpServerTransport):
         self._session_id = None
         self._message_endpoint = None
         self._protocol_version = None
+        self._sessionless = False
 
         LOGGER.info("HTTP connection closed and session state cleared")
 
     async def send(self, message: str) -> None:
         """Send a message to the MCP server via HTTP POST and handle inline response.
 
+        Forwards handshake-era (initialize + session) and modern-era
+        (2026-07-28, sessionless) traffic; the era is auto-detected from the
+        message and fixed for the adapter's lifetime.
+
         Args:
             message: JSON-RPC message to send to the MCP server.
 
         Raises:
             RuntimeError: If not connected to MCP server or HTTP request fails.
-            SessionExpiredError: If MCP server session has expired (404) and re-registration is needed.
+            SessionExpiredError: Handshake era only - if the MCP server session
+                has expired (404) and re-registration is needed. Modern-era
+                error statuses carry JSON-RPC bodies and are relayed, not raised.
         """
         if not self._connected or not self._client:
             raise RuntimeError("Not connected to MCP server")
 
         LOGGER.debug(f"→ HTTP: {message[:200]}...")
+        try:
+            msg_data = json.loads(message)
+        except Exception:
+            msg_data = {}
+
+        # Era detection: a modern-era (2026-07-28) message carries the protocol
+        # version in _meta, or opens with server/discover instead of initialize.
+        # Once a handshake session exists the era is fixed; the two never mix.
+        meta_version = extract_modern_protocol_version(msg_data)
+        if not self._session_id and (meta_version or msg_data.get("method") == DISCOVER_METHOD):
+            if not self._sessionless:
+                LOGGER.info("Modern (sessionless) MCP protocol era detected - forwarding without initialize handshake")
+            self._sessionless = True
+        if meta_version and self._sessionless:
+            self._protocol_version = meta_version
+
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -180,20 +257,30 @@ class StreamableHttpAdapter(McpServerTransport):
             LOGGER.info(f"Using authentication headers from gateway: {list(self._auth_headers.keys())}")
             headers.update(self._auth_headers)
 
-        # IMPORTANT: Only add session headers AFTER we have received them from the server
-        # The first request (initialize) should NOT include session headers - let the server create the session
-        # Subsequent requests must include BOTH session ID and protocol version
-        if self._session_id and self._protocol_version:
+        if self._sessionless:
+            # 2026-07-28 (sessionless): no session headers. Mint the headers the
+            # spec requires on every POST: MCP-Protocol-Version (matching the
+            # body _meta), Mcp-Method, and Mcp-Name for named operations.
+            if self._protocol_version:
+                headers["MCP-Protocol-Version"] = self._protocol_version
+            method = msg_data.get("method")
+            if isinstance(method, str) and method:
+                headers["Mcp-Method"] = method
+                name_param = NAMED_METHOD_PARAMS.get(method)
+                params = msg_data.get("params")
+                name = params.get(name_param) if name_param and isinstance(params, dict) else None
+                if isinstance(name, str) and name:
+                    headers["Mcp-Name"] = encode_header_value(name)
+        elif self._session_id and self._protocol_version:
+            # IMPORTANT: Only add session headers AFTER we have received them from the server
+            # The first request (initialize) should NOT include session headers - let the server create the session
+            # Subsequent requests must include BOTH session ID and protocol version
             headers["mcp-session-id"] = self._session_id
             headers["mcp-protocol-version"] = self._protocol_version
             LOGGER.debug(f"Including session headers: session_id={self._session_id}, protocol={self._protocol_version}")
         else:
             # No session - check if this is an initialize request
-            try:
-                msg_data = json.loads(message)
-                is_initialize = msg_data.get("method") == "initialize"
-            except Exception:
-                is_initialize = False
+            is_initialize = msg_data.get("method") == "initialize"
 
             if not is_initialize:
                 # Non-initialize request without a session - this should not happen
@@ -209,11 +296,21 @@ class StreamableHttpAdapter(McpServerTransport):
                 content=message,
                 headers=headers,
             )
-            response.raise_for_status()
+            if self._sessionless:
+                # Modern era: error statuses (404 method not found, 400
+                # unsupported protocol version) carry JSON-RPC error bodies the
+                # gateway must receive - relay them instead of raising. Only a
+                # bodyless error is a transport failure. Session-expiry
+                # recovery (SessionExpiredError) is a handshake-era concept and
+                # must never fire here.
+                if response.status_code >= 400 and not response.content:
+                    raise RuntimeError(f"MCP server returned HTTP {response.status_code} with no error body")
+            else:
+                response.raise_for_status()
 
             # Extract session ID from response headers (first request)
             session_id = response.headers.get("mcp-session-id")
-            if session_id and not self._session_id:
+            if session_id and not self._session_id and not self._sessionless:
                 self._session_id = session_id
                 LOGGER.info(f"Received session ID: {self._session_id}")
             LOGGER.info(

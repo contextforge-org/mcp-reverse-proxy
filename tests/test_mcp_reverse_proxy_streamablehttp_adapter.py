@@ -11,6 +11,7 @@ from __future__ import annotations
 
 # Standard
 import asyncio
+import json
 import ssl
 from unittest.mock import AsyncMock, Mock, call
 
@@ -19,7 +20,12 @@ import httpx
 import pytest
 
 # First-Party
-from mcp_reverse_proxy.transports.streamablehttp_adapter import SessionExpiredError, StreamableHttpAdapter
+from mcp_reverse_proxy.transports.streamablehttp_adapter import (
+    SessionExpiredError,
+    StreamableHttpAdapter,
+    encode_header_value,
+    extract_modern_protocol_version,
+)
 
 
 @pytest.mark.asyncio
@@ -107,6 +113,7 @@ async def test_stop_cancels_task_closes_client_and_clears_session_state() -> Non
     adapter._session_id = "session-1"
     adapter._message_endpoint = "http://server.example/mcp"
     adapter._protocol_version = "2025-11-05"
+    adapter._sessionless = True
     adapter._receive_task = asyncio.create_task(asyncio.sleep(10))
     adapter._client = AsyncMock()
 
@@ -116,6 +123,7 @@ async def test_stop_cancels_task_closes_client_and_clears_session_state() -> Non
     assert adapter._session_id is None
     assert adapter._message_endpoint is None
     assert adapter._protocol_version is None
+    assert adapter._sessionless is False
     assert adapter._client is None
 
 
@@ -402,3 +410,154 @@ async def test_receive_stream_sleeps_until_cancelled(monkeypatch) -> None:
         await adapter._receive_stream()
 
     assert call_count == 1
+
+
+def _modern_request(method: str, params: dict | None = None, request_id: int = 1) -> str:
+    """Build a modern-era (2026-07-28) JSON-RPC request carrying the version in params._meta."""
+    params = dict(params or {})
+    params["_meta"] = {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}
+    return json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+
+
+def _mock_response(status_code: int = 200, body: str = '{"jsonrpc":"2.0","id":1,"result":{}}', headers: dict | None = None) -> Mock:
+    """Build a mock httpx response for adapter send tests."""
+    response = Mock()
+    response.headers = headers or {}
+    response.status_code = status_code
+    response.content = body.encode()
+    response.text = body
+    response.raise_for_status = Mock()
+    return response
+
+
+def test_extract_modern_protocol_version_reads_params_meta_and_fallbacks() -> None:
+    """The version lives in params._meta per spec; top-level _meta is a tolerated fallback."""
+    assert extract_modern_protocol_version({"params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}}) == "2026-07-28"
+    assert extract_modern_protocol_version({"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}) == "2026-07-28"
+    assert extract_modern_protocol_version({"params": {"name": "echo"}}) is None
+    assert extract_modern_protocol_version({"params": None}) is None
+    assert extract_modern_protocol_version({}) is None
+
+
+def test_encode_header_value_passes_safe_values_and_encodes_unsafe() -> None:
+    """Header-safe ASCII passes through; everything else takes the =?base64?...?= sentinel."""
+    assert encode_header_value("get_weather") == "get_weather"
+    assert encode_header_value("companion://info") == "companion://info"
+
+    encoded_unicode = encode_header_value("Hello, 世界")
+    assert encoded_unicode == "=?base64?SGVsbG8sIOS4lueVjA==?="
+
+    # Leading/trailing whitespace and sentinel-pattern values must be encoded
+    assert encode_header_value(" padded ") == "=?base64?IHBhZGRlZCA=?="
+    assert encode_header_value("=?base64?literal?=") == "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?="
+
+    # Control characters are not header-safe
+    assert encode_header_value("line1\nline2") == "=?base64?bGluZTEKbGluZTI=?="
+
+
+@pytest.mark.asyncio
+async def test_send_modern_era_mints_version_and_routing_headers() -> None:
+    """Sessionless send must mint MCP-Protocol-Version, Mcp-Method, and Mcp-Name per request."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    handler = AsyncMock()
+    adapter.add_message_handler(handler)
+    adapter._client.post = AsyncMock(return_value=_mock_response())
+
+    await adapter.send(_modern_request("tools/call", {"name": "echo", "arguments": {"message": "hi"}}))
+
+    assert adapter._sessionless is True
+    assert adapter._protocol_version == "2026-07-28"
+    headers = adapter._client.post.await_args.kwargs["headers"]
+    assert headers["MCP-Protocol-Version"] == "2026-07-28"
+    assert headers["Mcp-Method"] == "tools/call"
+    assert headers["Mcp-Name"] == "echo"
+    assert "mcp-session-id" not in headers
+    assert "mcp-protocol-version" not in headers
+    handler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_server_discover_without_meta_enters_sessionless_mode() -> None:
+    """server/discover opens the modern era even without _meta; unknown version means no version header."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    adapter._client.post = AsyncMock(return_value=_mock_response())
+
+    await adapter.send('{"jsonrpc":"2.0","id":1,"method":"server/discover"}')
+
+    assert adapter._sessionless is True
+    headers = adapter._client.post.await_args.kwargs["headers"]
+    assert headers["Mcp-Method"] == "server/discover"
+    assert "MCP-Protocol-Version" not in headers
+
+
+@pytest.mark.asyncio
+async def test_send_sessionless_relays_404_jsonrpc_error_without_session_expiry() -> None:
+    """Modern-era 404 (method not found) is relayed as a response, never as SessionExpiredError."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    handler = AsyncMock()
+    adapter.add_message_handler(handler)
+
+    error_body = '{"jsonrpc":"2.0","id":9,"error":{"code":-32601,"message":"Method not found"}}'
+    adapter._client.post = AsyncMock(return_value=_mock_response(status_code=404, body=error_body))
+
+    await adapter.send(_modern_request("bogus/method", request_id=9))
+
+    handler.assert_awaited_once_with(error_body)
+    assert adapter._sessionless is True
+    assert adapter._protocol_version == "2026-07-28"
+
+
+@pytest.mark.asyncio
+async def test_send_sessionless_raises_on_bodyless_error_response() -> None:
+    """A modern-era error status with no body is a transport failure, not a relayable response."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+
+    response = _mock_response(status_code=500)
+    response.content = b""
+    adapter._client.post = AsyncMock(return_value=response)
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await adapter.send(_modern_request("tools/list"))
+
+
+@pytest.mark.asyncio
+async def test_send_with_existing_session_ignores_meta_and_keeps_handshake_era() -> None:
+    """A _meta version on a message must not flip an established handshake session to sessionless."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    adapter._session_id = "session-1"
+    adapter._protocol_version = "2025-11-25"
+    adapter._client.post = AsyncMock(return_value=_mock_response())
+
+    await adapter.send(_modern_request("tools/call", {"name": "echo"}))
+
+    assert adapter._sessionless is False
+    headers = adapter._client.post.await_args.kwargs["headers"]
+    assert headers["mcp-session-id"] == "session-1"
+    assert headers["mcp-protocol-version"] == "2025-11-25"
+    assert "Mcp-Method" not in headers
+
+
+@pytest.mark.asyncio
+async def test_send_sessionless_ignores_server_minted_session_id() -> None:
+    """A session id on a modern-era response must not flip the adapter into handshake mode."""
+    adapter = StreamableHttpAdapter("http://server.example/mcp")
+    adapter._connected = True
+    adapter._client = AsyncMock()
+    adapter._client.post = AsyncMock(return_value=_mock_response(headers={"mcp-session-id": "rogue-session"}))
+
+    await adapter.send(_modern_request("tools/list"))
+    await adapter.send(_modern_request("tools/list", request_id=2))
+
+    assert adapter._session_id is None
+    for post_call in adapter._client.post.await_args_list:
+        assert "mcp-session-id" not in post_call.kwargs["headers"]

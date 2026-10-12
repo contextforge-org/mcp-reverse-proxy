@@ -15,9 +15,10 @@ import pytest
 # First-Party
 from mcp_reverse_proxy.base import McpServerTransport
 from tests.integration.helpers import (
-    INITIALIZE_PARAMS,
+    HANDSHAKE_PROTOCOL_VERSIONS,
     INITIALIZED_NOTIFICATION,
     MessageCollector,
+    initialize_params,
     rpc_request,
     wait_until_ready,
 )
@@ -26,12 +27,15 @@ pytest.importorskip("fastmcp", reason="requires the 'integration' extra (pip ins
 pytestmark = pytest.mark.integration
 
 
-async def test_full_mcp_session_round_trip(mcp_transport: McpServerTransport, collector: MessageCollector) -> None:
+@pytest.mark.parametrize("protocol_version", HANDSHAKE_PROTOCOL_VERSIONS)
+async def test_full_mcp_session_round_trip(
+    mcp_transport: McpServerTransport, collector: MessageCollector, protocol_version: str
+) -> None:
     """Drive a complete MCP session over the parametrized transport."""
     await wait_until_ready(mcp_transport)
 
     # initialize
-    await mcp_transport.send(rpc_request(1, "initialize", INITIALIZE_PARAMS))
+    await mcp_transport.send(rpc_request(1, "initialize", initialize_params(protocol_version)))
     response = await collector.response_for(1)
     assert response["result"]["serverInfo"]["name"] == "reverse-proxy-companion"
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # Third-Party
@@ -30,6 +31,33 @@ COMPANION_SERVER = Path(__file__).parent / "companion_server.py"
 SERVER_STARTUP_TIMEOUT = 10.0
 
 
+@asynccontextmanager
+async def _running_companion_http(kind: str) -> AsyncIterator[str]:
+    """Run the companion server over an HTTP transport; yield its base URL."""
+    # Third-Party (integration extra, imported lazily so unit-only installs can collect this file)
+    import uvicorn
+
+    from tests.integration.companion_server import create_app
+
+    config = uvicorn.Config(create_app(kind), host="127.0.0.1", port=0, log_level="warning")
+    server = uvicorn.Server(config)
+    serve_task = asyncio.create_task(server.serve())
+
+    deadline = asyncio.get_running_loop().time() + SERVER_STARTUP_TIMEOUT
+    while not server.started:
+        if asyncio.get_running_loop().time() > deadline:
+            serve_task.cancel()
+            pytest.fail(f"companion server ({kind}) failed to start within {SERVER_STARTUP_TIMEOUT}s")
+        await asyncio.sleep(0.05)
+
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await serve_task
+
+
 @pytest.fixture
 def companion_stdio_command() -> str:
     """Command line that launches the companion server over stdio."""
@@ -40,40 +68,35 @@ def companion_stdio_command() -> str:
 async def mcp_transport(request: pytest.FixtureRequest, companion_stdio_command: str) -> AsyncIterator[McpServerTransport]:
     """Start each MCP-server-side transport against the live companion server."""
     kind: str = request.param
-    server = None
-    serve_task = None
 
     if kind == "stdio":
         adapter: McpServerTransport = StdioAdapter(companion_stdio_command)
-    else:
-        # Third-Party (integration extra, imported lazily so unit-only installs can collect this file)
-        import uvicorn
+        await adapter.start()
+        try:
+            yield adapter
+        finally:
+            await adapter.stop()
+        return
 
-        from tests.integration.companion_server import create_app
-
-        config = uvicorn.Config(create_app(kind), host="127.0.0.1", port=0, log_level="warning")
-        server = uvicorn.Server(config)
-        serve_task = asyncio.create_task(server.serve())
-
-        deadline = asyncio.get_running_loop().time() + SERVER_STARTUP_TIMEOUT
-        while not server.started:
-            if asyncio.get_running_loop().time() > deadline:
-                serve_task.cancel()
-                pytest.fail(f"companion server ({kind}) failed to start within {SERVER_STARTUP_TIMEOUT}s")
-            await asyncio.sleep(0.05)
-
-        port = server.servers[0].sockets[0].getsockname()[1]
-        base_url = f"http://127.0.0.1:{port}"
+    async with _running_companion_http(kind) as base_url:
         adapter = SseAdapter(f"{base_url}/sse") if kind == "sse" else StreamableHttpAdapter(f"{base_url}/mcp")
+        await adapter.start()
+        try:
+            yield adapter
+        finally:
+            await adapter.stop()
 
-    await adapter.start()
-    try:
-        yield adapter
-    finally:
-        await adapter.stop()
-        if server is not None and serve_task is not None:
-            server.should_exit = True
-            await serve_task
+
+@pytest.fixture
+async def streamable_http_transport() -> AsyncIterator[StreamableHttpAdapter]:
+    """Companion server over Streamable HTTP only (for protocol-era tests)."""
+    async with _running_companion_http("streamable-http") as base_url:
+        adapter = StreamableHttpAdapter(f"{base_url}/mcp")
+        await adapter.start()
+        try:
+            yield adapter
+        finally:
+            await adapter.stop()
 
 
 @pytest.fixture

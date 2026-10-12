@@ -9,6 +9,7 @@ The MCP Reverse Proxy is a standalone component that enables you to connect loca
 ### Key Features
 
 - **Multi-Transport Support**: Connect to MCP servers via stdio, HTTP/2 streaming, or SSE
+- **Dual Protocol Eras**: Forwards both handshake-era (≤ 2025-11-25) and sessionless 2026-07-28 MCP traffic
 - **WebSocket Gateway**: Persistent connection to remote gateways
 - **Automatic Reconnection**: Built-in retry logic with exponential backoff
 - **Health Monitoring**: Active health checks with automatic recovery
@@ -603,6 +604,26 @@ mcp-reverse-proxy --local-stdio "uvx mcp-server-git" \
   --token $TOKEN \
   --log-level INFO
 ```
+
+## MCP Protocol Eras
+
+The proxy forwards MCP traffic of both protocol eras, auto-detected per connection:
+
+- **Handshake era (2025-11-25 and earlier)**: the gateway drives the classic
+  `initialize` handshake; the Streamable HTTP adapter tracks the negotiated
+  `mcp-session-id` / `mcp-protocol-version` headers and performs
+  session-expiry recovery (re-registration) when the server expires a session.
+- **Modern era (2026-07-28, sessionless)**: no handshake and no sessions. The
+  gateway opens with `server/discover` (or any request carrying
+  `_meta["io.modelcontextprotocol/protocolVersion"]`), and the adapter mints
+  the spec-required HTTP headers per request: `MCP-Protocol-Version`,
+  `Mcp-Method`, and `Mcp-Name` (for `tools/call`, `resources/read`,
+  `prompts/get`; non-ASCII values use the `=?base64?...?=` sentinel encoding).
+  Error statuses with JSON-RPC bodies (e.g. 404 `-32601` method not found) are
+  relayed to the gateway as ordinary responses, not treated as session expiry.
+
+Era support by server-side transport: stdio and Streamable HTTP carry both
+eras; SSE is a handshake-era (legacy) transport by specification.
 
 ## Architecture
 
