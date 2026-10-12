@@ -67,6 +67,15 @@ uses line-length 120, target py311.
 
 ## Contribution workflow
 
+- **NEVER push directly to `main`** - no exceptions for maintainers, admins,
+  or AI agents. Every change (code, tests, CI, docs, tooling) lands on a
+  branch and merges via pull request: direct pushes bypass review and the
+  required CI gates. If something lands on `main` by mistake, revert or fix
+  through a PR - never fix forward with another direct push.
+- AI agents: commit to a branch, push it, open the PR, and stop there.
+  Never merge the PR and never push to `main`, even when asked to "ship",
+  "deliver", or "publish" - the PR is the deliverable; merging is the
+  maintainer's call.
 - Open an issue before a PR (bugs and features both). Do not implement
   issues labeled `triage` until a maintainer scopes them.
 - PRs target `main`; fill in the PR template.
