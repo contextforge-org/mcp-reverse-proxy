@@ -60,10 +60,25 @@ uses line-length 120, target py311.
 
 ## Code conventions
 
+- Coding standards align with Robert C. Martin's *Clean Code*:
+  intention-revealing names, small functions that do one thing, few
+  arguments, no duplication, boring control flow over cleverness.
+- Keep comments to a minimum - code is its own documentation. Prefer code
+  that explains itself through names, structure, and tests. Comment only
+  what code cannot express (for example, a security invariant or a
+  non-obvious external contract); delete comments that restate the code.
 - Imports are grouped with the repo's section-comment style
   (`# Future` / `# Standard` / `# Third-Party` / `# First-Party`); keep it.
 - Logging goes through `logging_config.py` (`LoggingService` /
   `CorrelationIdJsonFormatter`), not ad-hoc `logging.getLogger` handlers.
+
+## Writing conventions
+
+- Project writing (README, USER_README, docs/, and other user-facing
+  prose) complies with ASD-STE100 Simplified Technical English: use only
+  approved words, keep sentences short, give one instruction per
+  sentence, write in the active voice and present tense, use one term
+  for one concept, and write procedures as numbered steps.
 
 ## Contribution workflow
 
